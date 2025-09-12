@@ -100,6 +100,13 @@ public enum OSCOCADevice {
       }
     }
 
+    let mute = try await SwiftOCADevice.OcaMute(
+      role: "Mute",
+      deviceDelegate: device,
+      addToRootBlock: false
+    )
+    try await block.add(actionObject: mute)
+
     let gain = try await SwiftOCADevice.OcaGain(
       role: "Gain",
       deviceDelegate: device,
