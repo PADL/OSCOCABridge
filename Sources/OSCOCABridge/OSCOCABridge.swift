@@ -37,7 +37,7 @@ import IORingUtils
 typealias Socket = CFSocketWrapper
 #endif
 
-public actor OCAOSCBridge: OcaController {
+public actor OSCOCABridge {
   let address: any SocketAddress
   let device: OcaDevice
   var task: Task<(), Error>?
@@ -163,26 +163,26 @@ private extension OSCAddressPattern {
   }
 }
 
-public extension OCAOSCBridge {
-  nonisolated var flags: OcaControllerFlags { [] }
+extension OSCOCABridge: OcaController {
+  public nonisolated var flags: OcaControllerFlags { [] }
 
-  func addSubscription(
+  public func addSubscription(
     _ subscription: SwiftOCADevice
       .OcaSubscriptionManagerSubscription
   ) async throws {}
 
-  func removeSubscription(
+  public func removeSubscription(
     _ subscription: SwiftOCADevice
       .OcaSubscriptionManagerSubscription
   ) async throws {}
 
-  func removeSubscription(
+  public func removeSubscription(
     _ event: SwiftOCA.OcaEvent,
     property: SwiftOCA.OcaPropertyID?,
     subscriber: SwiftOCA.OcaMethod
   ) async throws {}
 
-  func sendMessage(
+  public func sendMessage(
     _ message: any SwiftOCA.Ocp1Message,
     type messageType: SwiftOCA.OcaMessageType
   ) async throws {}
