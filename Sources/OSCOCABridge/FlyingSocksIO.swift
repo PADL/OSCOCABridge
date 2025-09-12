@@ -39,7 +39,7 @@ private func _defaultPool(logger: Logging = .disabled) -> AsyncSocketPool {
 }
 
 private func _makeUdpSocket(address: sockaddr_storage) async throws -> Socket {
-  let socket = try Socket(domain: SOCK_DGRAM, type: .datagram)
+  let socket = try Socket(domain: AF_INET, type: .datagram)
 
   try socket.setValue(true, for: .localAddressReuse)
   try socket.bind(to: address)
