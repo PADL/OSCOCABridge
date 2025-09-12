@@ -145,7 +145,10 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
     from message: OSCMessage,
     for methodID: OcaMethodID
   ) throws -> [any Encodable] {
-    throw OSCOCACustomBridgeableError.methodNotBridged
+    guard methodID == OcaMethodID("4.2"), message.values.count == 1,
+          let boolValue = message.values[0] as? Bool
+    else { throw OSCOCACustomBridgeableError.methodNotBridged }
+    return [boolValue ? OcaMuteState.muted : OcaMuteState.unmuted]
   }
 }
 
