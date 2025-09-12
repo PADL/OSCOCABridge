@@ -20,22 +20,16 @@ import FoundationEssentials
 import Foundation
 #endif
 import OSCKitCore
-import SocketAddress
 import SwiftOCA
 import SwiftOCADevice
-import SystemPackage
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
 #endif
+import SocketAddress
 
-#if os(Linux)
-import IORing
-import IORingUtils
-#else
-typealias Socket = CFSocketWrapper
-#endif
+let MaxMessageSize = 1500
 
 public actor OSCOCABridge {
   let address: any SocketAddress
@@ -51,39 +45,10 @@ public actor OSCOCABridge {
     task?.cancel()
   }
 
-  private func _makeSocket() async throws -> Socket {
-    let socket: Socket
-
-    #if os(Linux)
-    socket = try Socket(ring: IORing.shared, domain: address.family, type: SOCK_DGRAM, protocol: 0)
-    try socket.bind(to: address)
-    #else
-    socket = try await CFSocketWrapper(address: address, type: SOCK_DGRAM, options: .server)
-    #endif
-    return socket
-  }
-
-  private func _run() async throws {
-    let socket = try await _makeSocket()
-    repeat {
-      #if os(Linux)
-      do {
-        for try await pdu in try await socket.receiveMessages(count: 1500) {
-          try? await _handle(message: Data(pdu.buffer), from: AnySocketAddress(bytes: pdu.name))
-        }
-      } catch Errno.canceled {}
-      #else
-      for try await pdu in socket.receivedMessages {
-        try? await _handle(message: pdu.1, from: pdu.0)
-      }
-      #endif
-    } while !Task.isCancelled
-  }
-
   public func run() {
     task?.cancel()
     task = Task {
-      try await _run()
+      try await udpEventLoop(address: address, with: self)
     }
   }
 
@@ -110,13 +75,19 @@ public actor OSCOCABridge {
     }
   }
 
-  private func _handle(message: Data, from address: any SocketAddress) async throws {
+  func _handle(message: Data, from address: any SocketAddress) async throws {
     guard let message = try message.parseOSC() else {
       throw Ocp1Error.status(.invalidRequest)
     }
 
     try await _handle(message: message, from: address)
   }
+
+  #if !os(Linux)
+  func _handle(message: Data, from address: sockaddr_storage) async throws {
+    try await _handle(message: message, from: AnySocketAddress(address))
+  }
+  #endif
 }
 
 private extension OcaDevice {
