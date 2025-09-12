@@ -36,7 +36,10 @@ func udpEventLoop(address: any SocketAddress, with bridge: OSCOCABridge) async t
   repeat {
     do {
       for try await pdu in try await socket.receiveMessages(count: MaxMessageSize) {
-        try? await bridge._handle(message: Data(pdu.buffer), from: AnySocketAddress(bytes: pdu.name))
+        try? await bridge._handle(
+          message: Data(pdu.buffer),
+          from: AnySocketAddress(bytes: pdu.name)
+        )
       }
     } catch Errno.canceled {}
   } while !Task.isCancelled

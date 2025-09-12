@@ -90,6 +90,65 @@ public actor OSCOCABridge {
   #endif
 }
 
+private extension Encodable {
+  var _ocp1Encoded: Data {
+    get throws {
+      try Ocp1Encoder().encode(self)
+    }
+  }
+}
+
+private extension [any Encodable] {
+  var _ocp1Encoded: Data {
+    get throws {
+      try reduce(Data()) {
+        var data = $0
+        try data.append($1._ocp1Encoded)
+        return data
+      }
+    }
+  }
+}
+
+private extension OSCValue {
+  var _ocp1Encoded: Data {
+    get throws {
+      guard let value = self as? Encodable else { throw Ocp1Error.status(.invalidRequest) }
+      let encoded: Data = try Ocp1Encoder().encode(value)
+      return encoded
+    }
+  }
+}
+
+private extension OSCValues {
+  var _ocp1Encoded: Data {
+    get throws {
+      try reduce(Data()) {
+        var data = $0
+        try data.append($1._ocp1Encoded)
+        return data
+      }
+    }
+  }
+}
+
+public enum OSCOCACustomBridgeableError: Error {
+  case methodNotBridged
+}
+
+public protocol OSCOCACustomBridgeable: SwiftOCADevice.OcaRoot {
+  func bridgeValues(from message: OSCMessage, for methodID: OcaMethodID) throws -> [any Encodable]
+}
+
+extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
+  public func bridgeValues(
+    from message: OSCMessage,
+    for methodID: OcaMethodID
+  ) throws -> [any Encodable] {
+    throw OSCOCACustomBridgeableError.methodNotBridged
+  }
+}
+
 private extension OcaDevice {
   // walk root block
   func _resolve(namePath: OcaNamePath) async throws -> OcaONo? {
@@ -102,21 +161,26 @@ private extension OcaDevice {
       throw Ocp1Error.status(.processingFailed)
     }
 
-    let encodedValues = try message.values.map { value in
-      guard let value = value as? Encodable else { throw Ocp1Error.status(.invalidRequest) }
-      let encoded: Data = try Ocp1Encoder().encode(value)
-      return encoded
-    }
-    let flattenedValues = encodedValues.reduce(Data()) {
-      var data = $0
-      data.append($1)
-      return data
-    }
-    let parameters = Ocp1Parameters(
-      parameterCount: OcaUint8(message.values.count),
-      parameterData: flattenedValues
-    )
+    var parameterCount: Int!
+    var parameterData: Data!
 
+    if let object = resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
+      do {
+        let bridgedValues = try object.bridgeValues(from: message, for: ocaMethodID)
+        parameterCount = bridgedValues.count
+        parameterData = try bridgedValues._ocp1Encoded
+      } catch OSCOCACustomBridgeableError.methodNotBridged {}
+    }
+
+    if parameterData == nil {
+      parameterCount = message.values.count
+      parameterData = try message.values._ocp1Encoded
+    }
+
+    let parameters = Ocp1Parameters(
+      parameterCount: OcaUint8(parameterCount),
+      parameterData: parameterData
+    )
     return Ocp1Command(handle: 0, targetONo: oNo, methodID: ocaMethodID, parameters: parameters)
   }
 }
