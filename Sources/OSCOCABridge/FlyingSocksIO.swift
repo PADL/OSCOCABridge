@@ -50,11 +50,12 @@ private func _makeUdpSocket(address: sockaddr_storage) async throws -> Socket {
 func udpEventLoop(address: sockaddr_storage, with bridge: OSCOCABridge) async throws {
   let socket = try await _makeUdpSocket(address: address)
   let pool = _defaultPool()
+  try await pool.prepare()
+
   let poolTask = Task { try await pool.run() }
   let asyncSocket = try AsyncSocket(socket: socket, pool: pool)
 
   for try await pdu in asyncSocket.messages(maxMessageLength: MaxMessageSize) {
-    debugPrint("got pdu \(pdu)!")
     try? await bridge._handle(message: Data(pdu.payload), from: pdu.peerAddress.makeStorage())
   }
 
