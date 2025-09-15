@@ -114,8 +114,7 @@ private extension OSCValue {
   var _ocp1Encoded: Data {
     get throws {
       guard let value = self as? Encodable else { throw Ocp1Error.status(.invalidRequest) }
-      let encoded: Data = try Ocp1Encoder().encode(value)
-      return encoded
+      return try value._ocp1Encoded
     }
   }
 }
@@ -123,11 +122,10 @@ private extension OSCValue {
 private extension OSCValues {
   var _ocp1Encoded: Data {
     get throws {
-      try reduce(Data()) {
-        var data = $0
-        try data.append($1._ocp1Encoded)
-        return data
-      }
+      try map {
+        guard let value = $0 as? Encodable else { throw Ocp1Error.status(.invalidRequest) }
+        return value
+      }._ocp1Encoded
     }
   }
 }
