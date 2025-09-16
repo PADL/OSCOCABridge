@@ -34,17 +34,21 @@ let package = Package(
         .product(name: "SwiftOCADevice", package: "SwiftOCA"),
         .product(name: "OSCKitCore", package: "OSCKit"),
         .product(name: "IORing", package: "IORingSwift", condition: .when(platforms: [.linux])),
-        .product(name: "FlyingSocks", package: "FlyingFox", condition: .when(platforms: [.macOS, .iOS, .android])),
+        .product(
+          name: "FlyingSocks",
+          package: "FlyingFox",
+          condition: .when(platforms: [.macOS, .iOS, .android])
+        ),
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
-  .executableTarget(
-    name: "OSCOCADevice",
-    dependencies: [
-      "OSCOCABridge",
-    ],
-    path: "Examples/OSCOCADevice",
-  ),
+    .executableTarget(
+      name: "OSCOCADevice",
+      dependencies: [
+        "OSCOCABridge",
+      ],
+      path: "Examples/OSCOCADevice"
+    ),
   ]
 )
