@@ -217,8 +217,8 @@ extension OSCOCABridge: OcaController {
     subscriber: SwiftOCA.OcaMethod
   ) async throws {}
 
-  public func sendMessage(
-    _ message: any SwiftOCA.Ocp1Message,
+  public func sendMessages(
+    _ message: [any SwiftOCA.Ocp1Message],
     type messageType: SwiftOCA.OcaMessageType
   ) async throws {}
 }
