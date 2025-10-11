@@ -62,21 +62,19 @@ public actor OSCOCABridge {
     _ = await device.handleCommand(command, from: self)
   }
 
-  private func _handle(message: any OSCObject, from address: any SocketAddress) async throws {
+  private func _handle(message: OSCPacket, from address: any SocketAddress) async throws {
     switch message {
-    case let bundle as OSCBundle:
+    case let .bundle(bundle):
       for element in bundle.elements {
         try await _handle(message: element, from: address)
       }
-    case let message as OSCMessage:
+    case let .message(message):
       try await _handle(message: message, from: address)
-    default:
-      break
     }
   }
 
   func _handle(message: Data, from address: any SocketAddress) async throws {
-    guard let message = try message.parseOSC() else {
+    guard let message = try OSCPacket(from: message) else {
       throw Ocp1Error.status(.invalidRequest)
     }
 
