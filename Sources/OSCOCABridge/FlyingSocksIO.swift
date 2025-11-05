@@ -40,12 +40,12 @@ private func _defaultPool(logger: Logging = .disabled) -> AsyncSocketPool {
 
 private extension Socket {
   func setIPv6Only() throws {
-    try setValue(1, for: Int32SocketOption(name: IPV6_V6ONLY), level: IPPROTO_IPV6)
+    try setValue(1, for: Int32SocketOption(level: IPPROTO_IPV6, name: IPV6_V6ONLY))
   }
 }
 
-private func _makeUdpSocket(address: sockaddr_storage) async throws -> Socket {
-  let socket = try Socket(domain: address.family, type: .datagram)
+private func _makeUdpSocket(address: SocketAddress) async throws -> Socket {
+  let socket = try Socket(domain: Int32(address.family), type: .datagram)
 
   try socket.setValue(true, for: .localAddressReuse)
   if address.family == sa_family_t(AF_INET6) { try socket.setIPv6Only() }
