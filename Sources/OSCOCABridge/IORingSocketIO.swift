@@ -31,6 +31,7 @@ func udpEventLoop(address: any SocketAddress, with bridge: OSCOCABridge) async t
   let socket: Socket
 
   socket = try Socket(ring: IORing.shared, domain: address.family, type: SOCK_DGRAM, protocol: 0)
+  if address.family == sa_family_t(AF_INET6) { try socket.setIPv6Only() }
   try socket.bind(to: address)
 
   repeat {

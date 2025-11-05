@@ -38,10 +38,17 @@ private func _defaultPool(logger: Logging = .disabled) -> AsyncSocketPool {
   #endif
 }
 
+private extension Socket {
+  func setIPv6Only() throws {
+    try setValue(1, for: Int32SocketOption(name: IPV6_V6ONLY), level: IPPROTO_IPV6)
+  }
+}
+
 private func _makeUdpSocket(address: sockaddr_storage) async throws -> Socket {
-  let socket = try Socket(domain: AF_INET, type: .datagram)
+  let socket = try Socket(domain: address.family, type: .datagram)
 
   try socket.setValue(true, for: .localAddressReuse)
+  if address.family == sa_family_t(AF_INET6) { try socket.setIPv6Only() }
   try socket.bind(to: address)
 
   return socket
