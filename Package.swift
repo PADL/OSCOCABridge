@@ -17,7 +17,7 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/PADL/SwiftOCA", branch: "main"),
-    .package(url: "https://github.com/PADL/SocketAddress", from: "0.0.1"),
+    .package(url: "https://github.com/PADL/SocketAddress", from: "0.4.5"),
     .package(url: "https://github.com/PADL/IORingSwift", from: "0.1.9"),
     .package(url: "https://github.com/orchetect/OSCKit", branch: "main"),
     .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
