@@ -120,10 +120,11 @@ private extension OSCValue {
 private extension OSCValues {
   var _ocp1Encoded: Data {
     get throws {
-      try map {
+      let values = try map {
         guard let value = $0 as? Encodable else { throw Ocp1Error.status(.invalidRequest) }
         return value
-      }._ocp1Encoded
+      }
+      return try values._ocp1Encoded
     }
   }
 }
@@ -133,14 +134,17 @@ public enum OSCOCACustomBridgeableError: Error {
 }
 
 public protocol OSCOCACustomBridgeable: SwiftOCADevice.OcaRoot {
-  func bridgeValues(from message: OSCMessage, for methodID: OcaMethodID) throws -> [any Encodable]
+  func bridgeValues(
+    from message: OSCMessage,
+    for methodID: OcaMethodID
+  ) throws -> [any Encodable & Sendable]
 }
 
 extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
   public func bridgeValues(
     from message: OSCMessage,
     for methodID: OcaMethodID
-  ) throws -> [any Encodable] {
+  ) throws -> [any Encodable & Sendable] {
     guard methodID == OcaMethodID("4.2"), let boolValue = message.values.first as? Bool
     else { throw OSCOCACustomBridgeableError.methodNotBridged }
     return [boolValue ? OcaMuteState.muted : OcaMuteState.unmuted]
@@ -164,9 +168,9 @@ private extension OcaDevice {
 
     if let object = resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
       do {
-        let bridgedValues = try object.bridgeValues(from: message, for: ocaMethodID)
+        let bridgedValues = try await object.bridgeValues(from: message, for: ocaMethodID)
         parameterCount = bridgedValues.count
-        parameterData = try bridgedValues._ocp1Encoded
+        parameterData = try bridgedValues.map { $0 as any Encodable }._ocp1Encoded
       } catch OSCOCACustomBridgeableError.methodNotBridged {}
     }
 

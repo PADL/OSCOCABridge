@@ -28,7 +28,6 @@ import OSCOCABridge
 
 @main
 public enum OSCOCADevice {
-  static var testActuator: SwiftOCADevice.OcaBooleanActuator?
   static let port: UInt16 = 65000
   static let oscPort: UInt16 = 8000
 
