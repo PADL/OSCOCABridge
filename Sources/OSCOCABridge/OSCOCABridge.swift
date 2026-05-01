@@ -19,7 +19,7 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
-import OSCKitCore
+import SwiftOSCCore
 import SwiftOCA
 import SwiftOCADevice
 #if canImport(Darwin)
