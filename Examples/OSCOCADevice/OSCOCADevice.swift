@@ -130,7 +130,18 @@ public enum OSCOCADevice {
       }
       #endif
       taskGroup.addTask {
-        for try await value in await gain.$gain {
+        let stream = AsyncStream<OcaDB> { continuation in
+          let observer = Task { @OcaDevice in
+            do {
+              for try await value in gain.$gain {
+                continuation.yield(value)
+              }
+            } catch {}
+            continuation.finish()
+          }
+          continuation.onTermination = { _ in observer.cancel() }
+        }
+        for await value in stream {
           print("gain set to \(value)!")
         }
       }
