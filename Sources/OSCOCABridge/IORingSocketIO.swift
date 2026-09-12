@@ -34,16 +34,12 @@ func udpEventLoop(address: any SocketAddress, with bridge: OSCOCABridge) async t
   if address.family == sa_family_t(AF_INET6) { try socket.setIPv6Only() }
   try socket.bind(to: address)
 
-  repeat {
-    do {
-      for try await pdu in try await socket.receiveMessages(count: MaxMessageSize) {
-        try? await bridge._handle(
-          message: Data(pdu.buffer),
-          from: AnySocketAddress(bytes: pdu.name)
-        )
-      }
-    } catch Errno.canceled {}
-  } while !Task.isCancelled
+  for try await pdu in try await socket.receiveMessages(count: MaxMessageSize) {
+    try? await bridge._handle(
+      message: Data(pdu.buffer),
+      from: AnySocketAddress(bytes: pdu.name)
+    )
+  }
 }
 
 #endif
