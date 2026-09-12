@@ -179,7 +179,7 @@ private extension OcaDevice {
       parameterData = try message.values._ocp1Encoded
     }
 
-    let parameters = Ocp1Parameters(
+    let parameters = OcaParameters(
       parameterCount: OcaUint8(parameterCount),
       parameterData: parameterData
     )
