@@ -22,7 +22,7 @@ let package = Package(
     .package(url: "https://github.com/orchetect/swift-osc-core", branch: "main"),
     .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-system", from: "1.2.1"),
-    .package(url: "https://github.com/lhoward/AsyncExtensions", from: "0.9.0"),
+    .package(url: "https://github.com/lhoward/AsyncExtensions", from: "0.10.0"),
     .package(url: "https://github.com/swhitty/FlyingFox", from: "0.20.0"),
   ],
   targets: [
