@@ -58,7 +58,7 @@ public actor OSCOCABridge {
   }
 
   private func _handle(message: OSCMessage, from address: any SocketAddress) async throws {
-    let command = try await device._bridgeOscMessage(message)
+    let command = try await device._bridgeOscMessage(message, from: self)
     _ = await device.handleCommand(command, from: self)
   }
 
@@ -153,13 +153,23 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
 
 private extension OcaDevice {
   // walk root block
-  func _resolve(namePath: OcaNamePath) async throws -> OcaONo? {
-    try await rootBlock.find(actionObjectsByRolePath: namePath, resultFlags: .oNo).first?.oNo
+  func _resolve(
+    namePath: OcaNamePath,
+    from controller: any OcaController
+  ) async throws -> OcaONo? {
+    try await rootBlock.findActionObjectsByRolePath(
+      searchPath: namePath,
+      resultFlags: .oNo,
+      from: controller
+    ).first?.oNo
   }
 
-  func _bridgeOscMessage(_ message: OSCMessage) async throws -> Ocp1Command {
+  func _bridgeOscMessage(
+    _ message: OSCMessage,
+    from controller: any OcaController
+  ) async throws -> Ocp1Command {
     let (ocaNamePath, ocaMethodID) = try message.addressPattern._bridgeToOcaPathAndMethodID()
-    guard let oNo = try await _resolve(namePath: ocaNamePath) else {
+    guard let oNo = try await _resolve(namePath: ocaNamePath, from: controller) else {
       throw Ocp1Error.status(.processingFailed)
     }
 
