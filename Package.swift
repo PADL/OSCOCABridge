@@ -43,6 +43,15 @@ let package = Package(
         .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
+    .testTarget(
+      name: "OSCOCABridgeTests",
+      dependencies: [
+        "OSCOCABridge",
+        "SocketAddress",
+        .product(name: "SwiftOCADevice", package: "SwiftOCA"),
+        .product(name: "SwiftOSCCore", package: "swift-osc-core"),
+      ]
+    ),
     .executableTarget(
       name: "OSCOCADevice",
       dependencies: [

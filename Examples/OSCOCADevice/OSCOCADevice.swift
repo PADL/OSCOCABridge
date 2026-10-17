@@ -52,14 +52,12 @@ public enum OSCOCADevice {
       deviceManager.modelGUID = OcaModelGUID(mfrCode: .init((0, 0, 0)), modelCode: (1, 2, 3, 4))
     }
     #if os(Linux)
-    let streamEndpoint = try await Ocp1IORingStreamDeviceEndpoint(address: listenAddressData)
-    let datagramEndpoint = try await Ocp1IORingDatagramDeviceEndpoint(address: listenAddressData)
-    #elseif canImport(FlyingSocks)
-    let streamEndpoint = try await Ocp1FlyingSocksStreamDeviceEndpoint(address: listenAddressData)
-    let datagramEndpoint =
-      try await Ocp1FlyingSocksDatagramDeviceEndpoint(address: listenAddressData)
+    let streamEndpoint = try await OcaIORingStreamDeviceEndpoint(address: listenAddressData)
+    let datagramEndpoint = try await OcaIORingDatagramDeviceEndpoint(address: listenAddressData)
     #else
-    let streamEndpoint = try await Ocp1StreamDeviceEndpoint(address: listenAddressData)
+    let streamEndpoint = try await OcaFlyingSocksStreamDeviceEndpoint(address: listenAddressData)
+    let datagramEndpoint =
+      try await OcaFlyingSocksDatagramDeviceEndpoint(address: listenAddressData)
     #endif
 
     listenAddress = sockaddr_in()
@@ -123,12 +121,10 @@ public enum OSCOCADevice {
         print("Starting OCP.1 stream endpoint \(streamEndpoint)...")
         try await streamEndpoint.run()
       }
-      #if os(Linux) || canImport(FlyingSocks)
       taskGroup.addTask {
         print("Starting OCP.1 datagram endpoint \(datagramEndpoint)...")
         try await datagramEndpoint.run()
       }
-      #endif
       taskGroup.addTask {
         let stream = AsyncStream<OcaDB> { continuation in
           let observer = Task { @OcaDevice in

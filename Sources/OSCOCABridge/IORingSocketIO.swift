@@ -33,6 +33,9 @@ func udpEventLoop(address: any SocketAddress, with bridge: OSCOCABridge) async t
   socket = try Socket(ring: IORing.shared, domain: address.family, type: SOCK_DGRAM, protocol: 0)
   if address.family == sa_family_t(AF_INET6) { try socket.setIPv6Only() }
   try socket.bind(to: address)
+  await bridge._set(sender: { data, peerAddress in
+    _ = try await socket.send(Array(data), to: peerAddress)
+  })
 
   for try await pdu in try await socket.receiveMessages(count: MaxMessageSize) {
     try? await bridge._handle(

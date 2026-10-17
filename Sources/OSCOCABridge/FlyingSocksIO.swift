@@ -61,6 +61,9 @@ func udpEventLoop(address: sockaddr_storage, with bridge: OSCOCABridge) async th
 
   let poolTask = Task { try await pool.run() }
   let asyncSocket = try AsyncSocket(socket: socket, pool: pool)
+  await bridge._set(sender: { data, peerAddress in
+    try await asyncSocket.send(data, to: peerAddress)
+  })
 
   for try await pdu in asyncSocket.messages(maxMessageLength: MaxMessageSize) {
     try? await bridge._handle(message: Data(pdu.payload), from: pdu.peerAddress.makeStorage())
