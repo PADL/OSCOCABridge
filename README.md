@@ -43,10 +43,13 @@ In TouchOSC, give a fader the address `/Block/Gain/gain` and a UDP connection to
 
 ```lua
 function init()
-  sendOSC('/subscribe', '/Block/Gain/gain', 9001) -- 9001: the connection's receive port
+  -- 9001: the connection's receive port, which must be sent as an int32
+  sendOSC({ '/subscribe', { { tag = 's', value = '/Block/Gain/gain' }, { tag = 'i', value = 9001 } } })
 end
 ```
 
-The fader then follows the gain however it is changed.
+The fader then follows the gain however it is changed. (`sendOSC('/subscribe', '/Block/Gain/gain', 9001)` would send the port as a float, which the bridge refuses.)
+
+[`Examples/OSCOCADevice/OSCOCADevice.tosc`](Examples/OSCOCADevice/OSCOCADevice.tosc) is a layout for the example program, with its gain, mute and matrix actuators, and a list of the notifications it receives. Give its first connection a UDP host of the bridge, a send port of 8000 and a receive port of 9001, or change `PORT` in the root script to the receive port.
 
 OSCOCABridge uses [swift-osc-core](https://github.com/orchetect/swift-osc-core).

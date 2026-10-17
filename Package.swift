@@ -57,7 +57,8 @@ let package = Package(
       dependencies: [
         "OSCOCABridge",
       ],
-      path: "Examples/OSCOCADevice"
+      path: "Examples/OSCOCADevice",
+      exclude: ["OSCOCADevice.tosc"]
     ),
   ]
 )
