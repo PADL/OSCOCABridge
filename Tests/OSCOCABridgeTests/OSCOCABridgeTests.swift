@@ -422,6 +422,37 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     XCTAssertEqual(messages.map(\.destination), ["[::1]:9001"])
   }
 
+  func testStaticDestinationSurvivesAPeerUnsubscribing() async throws {
+    let destination = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:9200"
+    )
+    try await send(OSCMessage("/Block/Mute/state", values: [false]))
+    try await bridge.addDestination(destination, patterns: ["/Block/Mute/state"])
+    _ = await outbox.messages(count: 1)
+    await outbox.removeAll()
+
+    // another client on the same host unsubscribing is not the app removing its destination
+    try await send(OSCMessage("/unsubscribe"))
+    try await send(OSCMessage("/unsubscribe", values: [Int32(9200)]))
+    try await send(OSCMessage("/Block/Mute/state", values: [true]))
+    let messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9200"])
+
+    await bridge.removeDestination(destination)
+    await outbox.removeAll()
+    try await send(OSCMessage("/Block/Mute/state", values: [false]))
+    let after = await outbox.messages(count: 1, timeout: .milliseconds(200))
+    XCTAssertTrue(after.isEmpty)
+  }
+
+  func testSubscribingToNothingIsAnError() async throws {
+    try await send(OSCMessage("/subscribe", values: ["/Nope/*"]))
+    let messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/error"])
+    XCTAssertEqual(messages.first?.message.values.first as? String, "/subscribe")
+  }
+
   func testStaticDestination() async throws {
     let destination = try AnySocketAddress(
       family: sa_family_t(AF_INET),
