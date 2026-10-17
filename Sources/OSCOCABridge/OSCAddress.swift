@@ -27,10 +27,10 @@ enum OSCOCALeaf: Equatable, Sendable {
 
   init(_ string: some StringProtocol) {
     let string = String(string)
-    // both parsers accept the dotted form, which is a method ID's alone
+    // both parsers accept the dotted form, so the method ID's goes first and takes it
     if let methodID = try? OcaMethodID(unsafeString: string) {
       self = .methodID(methodID)
-    } else if string.contains("p"), let propertyID = try? OcaPropertyID(unsafeString: string) {
+    } else if let propertyID = try? OcaPropertyID(unsafeString: string) {
       self = .propertyID(propertyID)
     } else {
       self = .name(string)
