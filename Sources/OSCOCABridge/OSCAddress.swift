@@ -20,7 +20,7 @@ import SwiftOSCCore
 /// The last component of an object address: the member of the object it names. A method
 /// ID is written dotted (`4.2`) or in AES70 notation (`4m2`), a property ID only in AES70
 /// notation (`4p1`); anything else is a property or method name.
-enum OSCOCALeaf: Equatable, Sendable {
+enum OSCOCAAddressLeaf: Equatable, Sendable {
   case methodID(OcaMethodID)
   case propertyID(OcaPropertyID)
   case name(String)
@@ -45,7 +45,7 @@ enum OSCOCARequest: Sendable {
   /// `/unsubscribe ,s <address>… [,i port]`; no addresses means every subscription.
   case unsubscribe(patterns: [String], port: UInt16?)
   /// `/<rolePath>/<leaf>`: a method to invoke, or a property to get or set.
-  case member(rolePath: OcaNamePath, leaf: OSCOCALeaf)
+  case member(rolePath: OcaNamePath, leaf: OSCOCAAddressLeaf)
 
   static let subscribeAddress = "subscribe"
   static let unsubscribeAddress = "unsubscribe"
@@ -67,11 +67,11 @@ enum OSCOCARequest: Sendable {
   }
 
   /// An object address's role path and leaf.
-  static func member(_ pathComponents: [Substring]) throws -> (OcaNamePath, OSCOCALeaf) {
+  static func member(_ pathComponents: [Substring]) throws -> (OcaNamePath, OSCOCAAddressLeaf) {
     guard pathComponents.count > 1, let leaf = pathComponents.last else {
       throw Ocp1Error.status(.badMethod)
     }
-    return (pathComponents.dropLast().map { String($0) }, OSCOCALeaf(leaf))
+    return (pathComponents.dropLast().map { String($0) }, OSCOCAAddressLeaf(leaf))
   }
 
   private static func patternsAndPort(_ values: OSCValues) throws -> ([String], UInt16?) {

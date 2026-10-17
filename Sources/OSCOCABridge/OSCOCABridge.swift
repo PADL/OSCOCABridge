@@ -221,7 +221,7 @@ public actor OSCOCABridge {
   private func handle(
     _ message: OSCMessage,
     rolePath: OcaNamePath,
-    leaf: OSCOCALeaf,
+    leaf: OSCOCAAddressLeaf,
     from source: AnySocketAddress
   ) async throws {
     let (oNo, member) = try await resolve(rolePath: rolePath, leaf: leaf)
@@ -241,7 +241,7 @@ public actor OSCOCABridge {
 
   private func resolve(
     rolePath: OcaNamePath,
-    leaf: OSCOCALeaf
+    leaf: OSCOCAAddressLeaf
   ) async throws -> (OcaONo, OSCOCAMember) {
     guard let rootBlock = await device.rootBlock else {
       throw Ocp1Error.status(.deviceError)

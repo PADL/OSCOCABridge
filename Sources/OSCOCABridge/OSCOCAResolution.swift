@@ -34,7 +34,7 @@ extension SwiftOCADevice.OcaRoot {
   /// Resolves an address leaf against this object: a method ID, a property ID, a
   /// property name, then a method name, which may be a property accessor's. Names are
   /// matched exactly, in lower camel case: `gain`, `setGain`.
-  func oscMember(for leaf: OSCOCALeaf) -> OSCOCAMember? {
+  func oscMember(for leaf: OSCOCAAddressLeaf) -> OSCOCAMember? {
     switch leaf {
     case let .methodID(methodID):
       return .method(methodID)

@@ -34,16 +34,16 @@ import XCTest
 
 final class OSCAddressTests: XCTestCase {
   func testDottedLeafIsAlwaysAMethodID() {
-    XCTAssertEqual(OSCOCALeaf("4.2"), .methodID(OcaMethodID("4.2")))
+    XCTAssertEqual(OSCOCAAddressLeaf("4.2"), .methodID(OcaMethodID("4.2")))
     // a dotted property ID is not a thing: it is the method with that ID
-    XCTAssertEqual(OSCOCALeaf("4.1"), .methodID(OcaMethodID("4.1")))
+    XCTAssertEqual(OSCOCAAddressLeaf("4.1"), .methodID(OcaMethodID("4.1")))
   }
 
   func testAES70NotationLeaves() {
-    XCTAssertEqual(OSCOCALeaf("4m2"), .methodID(OcaMethodID("4.2")))
-    XCTAssertEqual(OSCOCALeaf("4p1"), .propertyID(OcaPropertyID("4.1")))
-    XCTAssertEqual(OSCOCALeaf("04p01"), .propertyID(OcaPropertyID("4.1")))
-    XCTAssertEqual(OSCOCALeaf("03m02"), .methodID(OcaMethodID("3.2")))
+    XCTAssertEqual(OSCOCAAddressLeaf("4m2"), .methodID(OcaMethodID("4.2")))
+    XCTAssertEqual(OSCOCAAddressLeaf("4p1"), .propertyID(OcaPropertyID("4.1")))
+    XCTAssertEqual(OSCOCAAddressLeaf("04p01"), .propertyID(OcaPropertyID("4.1")))
+    XCTAssertEqual(OSCOCAAddressLeaf("03m02"), .methodID(OcaMethodID("3.2")))
   }
 
   func testNamesAreNotIDs() {
@@ -61,7 +61,7 @@ final class OSCAddressTests: XCTestCase {
       "4m2m",
       "Gain",
     ] {
-      XCTAssertEqual(OSCOCALeaf(name), .name(name), name)
+      XCTAssertEqual(OSCOCAAddressLeaf(name), .name(name), name)
     }
   }
 
@@ -243,7 +243,7 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     let gain = try await object(at: ["Block", "Gain"])
 
     func member(_ leaf: String) async -> String? {
-      switch await gain.oscMember(for: OSCOCALeaf(leaf)) {
+      switch await gain.oscMember(for: OSCOCAAddressLeaf(leaf)) {
       case let .method(methodID): "method \(methodID)"
       case let .property(descriptor): "property \(descriptor.name)"
       case nil: nil
