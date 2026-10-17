@@ -25,7 +25,8 @@ enum OSCOCAMember: Sendable {
 }
 
 extension SwiftOCADevice.OcaRoot {
-  /// The properties introspection shows, which are those an address can name.
+  /// The properties introspection shows, which a wildcard subscription is matched against.
+  /// A hidden property is still there to be named: hidden means not advertised.
   var oscVisibleProperties: [OcaDevicePropertyDescriptor] {
     devicePropertyDescriptors.filter { !$0.flags.contains(.hidden) }
   }
@@ -38,17 +39,15 @@ extension SwiftOCADevice.OcaRoot {
     case let .methodID(methodID):
       return .method(methodID)
     case let .propertyID(propertyID):
-      return oscVisibleProperties
+      return devicePropertyDescriptors
         .first { $0.propertyID == propertyID || $0.yPropertyID == propertyID }
         .map { .property($0) }
     case let .name(name):
-      let properties = oscVisibleProperties
+      let properties = devicePropertyDescriptors
       if let property = properties.first(where: { $0.name == name }) {
         return .property(property)
       }
-      if let method = deviceMethodDescriptors
-        .first(where: { !$0.isHidden && $0.name.lowerCamelCased == name })
-      {
+      if let method = deviceMethodDescriptors.first(where: { $0.name.lowerCamelCased == name }) {
         return .method(method.methodID)
       }
       for property in properties {

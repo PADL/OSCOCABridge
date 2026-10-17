@@ -157,6 +157,20 @@ private actor Outbox {
   func removeAll() { messages.removeAll() }
 }
 
+/// An actuator with a settable vector property, which the library's classes lack.
+@OcaDeviceClass
+private final class XYActuator: SwiftOCADevice.OcaActuator {
+  override class var classID: OcaClassID { OcaClassID(parent: super.classID, 65001) }
+
+  @OcaVectorDeviceProperty(
+    xPropertyID: OcaPropertyID("5.1"),
+    yPropertyID: OcaPropertyID("5.2"),
+    getMethodID: OcaMethodID("5.1"),
+    setMethodID: OcaMethodID("5.2")
+  )
+  var position = OcaVector2D<OcaInt32>(x: 0, y: 0)
+}
+
 /// The device's objects, made once: the shared device is the only one there is.
 private enum TestDevice {
   static let objects = Task { @OcaDevice in
@@ -178,6 +192,8 @@ private enum TestDevice {
       addToRootBlock: false
     )
     try await block.add(actionObject: mute)
+    let xy = try await XYActuator(role: "XY", deviceDelegate: device, addToRootBlock: false)
+    try await block.add(actionObject: xy)
   }
 }
 
@@ -337,6 +353,73 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     let addresses = Set(messages.map(\.message.addressPattern.stringValue))
     XCTAssertTrue(addresses.contains("/Block/Gain/gain"))
     XCTAssertTrue(addresses.contains("/Block/Mute/state"))
+  }
+
+  func testVectorPropertyConvertsEachComponent() async throws {
+    try await send(OSCMessage("/subscribe", values: ["/Block/XY/position", Int32(9001)]))
+    _ = await outbox.messages(count: 1)
+    await outbox.removeAll()
+
+    // floats are converted to the integer components, not reinterpreted
+    try await send(
+      OSCMessage("/Block/XY/position", values: [Float(3), Float(4)]),
+      from: otherClient
+    )
+    try await send(OSCMessage("/Block/XY/position"))
+    let messages = await outbox.messages(count: 2)
+    // one change message for the two component events, then the reply to the get
+    XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9001", "127.0.0.1:9000"])
+    XCTAssertEqual(messages.map { $0.message.values as? [Int32] }, [[3, 4], [3, 4]])
+    let late = await outbox.messages(count: 3, timeout: .milliseconds(200))
+    XCTAssertEqual(late.count, 2, "a vector change is sent once")
+
+    try await send(OSCMessage("/Block/XY/position", values: [Float(1)]))
+    let error = await outbox.messages(count: 3)
+    XCTAssertEqual(error.last?.message.addressPattern.stringValue, "/error")
+  }
+
+  func testUnsubscribeWithoutPortCoversPortSubscriptions() async throws {
+    try await send(OSCMessage("/subscribe", values: ["/Block/Gain/gain", Int32(9001)]))
+    _ = await outbox.messages(count: 1)
+    await outbox.removeAll()
+
+    // as TouchOSC would on exit: no port, so every subscription from this host goes
+    try await send(OSCMessage("/unsubscribe"))
+    try await send(OSCMessage("/Block/Gain/gain", values: [Float(-20)]), from: otherClient)
+    let messages = await outbox.messages(count: 1, timeout: .milliseconds(200))
+    XCTAssertTrue(messages.isEmpty)
+  }
+
+  func testDestinationAddedBeforeRunningIsSentOnceRunning() async throws {
+    let outbox = Outbox()
+    let bridge = OSCOCABridge(address: client, device: device)
+    let destination = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:9300"
+    )
+    try await bridge.addDestination(destination, patterns: ["/Block/Gain/gain"])
+    var messages = await outbox.messages(count: 1, timeout: .milliseconds(200))
+    XCTAssertTrue(messages.isEmpty)
+
+    // the socket arrives, as it does when the bridge runs; the initial value was waiting
+    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+    messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9300"])
+    XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/Block/Gain/gain"])
+    await bridge.stop()
+  }
+
+  func testIPv6DestinationKeepsTheSourceAddress() async throws {
+    let client6 = try AnySocketAddress(
+      family: sa_family_t(AF_INET6),
+      presentationAddress: "[::1]:9000"
+    )
+    try await send(
+      OSCMessage("/subscribe", values: ["/Block/Gain/gain", Int32(9001)]),
+      from: client6
+    )
+    let messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.destination), ["[::1]:9001"])
   }
 
   func testStaticDestination() async throws {

@@ -61,18 +61,17 @@ enum OSCOCARequest: Sendable {
         ? .subscribe(patterns: patterns, port: port)
         : .unsubscribe(patterns: patterns, port: port)
     } else {
-      self = try Self.member(pathComponents)
+      let (rolePath, leaf) = try Self.member(pathComponents)
+      self = .member(rolePath: rolePath, leaf: leaf)
     }
   }
 
-  static func member(_ pathComponents: [Substring]) throws -> Self {
+  /// An object address's role path and leaf.
+  static func member(_ pathComponents: [Substring]) throws -> (OcaNamePath, OSCOCALeaf) {
     guard pathComponents.count > 1, let leaf = pathComponents.last else {
       throw Ocp1Error.status(.badMethod)
     }
-    return .member(
-      rolePath: pathComponents.dropLast().map { String($0) },
-      leaf: OSCOCALeaf(leaf)
-    )
+    return (pathComponents.dropLast().map { String($0) }, OSCOCALeaf(leaf))
   }
 
   private static func patternsAndPort(_ values: OSCValues) throws -> ([String], UInt16?) {
