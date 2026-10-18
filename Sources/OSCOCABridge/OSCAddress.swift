@@ -107,6 +107,15 @@ extension String {
     contains { "*?[]{}".contains($0) }
   }
 
+  /// Whether the string can be a part of an OSC address: printable ASCII, without the
+  /// characters OSC reserves. A role that is not is left out of what a wildcard finds.
+  var isOSCAddressPart: Bool {
+    !isEmpty && allSatisfy { character in
+      guard let ascii = character.asciiValue, ascii > 0x20, ascii < 0x7F else { return false }
+      return !"#*,/?[]{}".contains(character)
+    }
+  }
+
   /// `GetGain` → `getGain`: model method names, as the leaf names them.
   var lowerCamelCased: String {
     guard let first else { return self }

@@ -204,6 +204,13 @@ private enum TestDevice {
     try await block.add(actionObject: mute)
     let xy = try await XYActuator(role: "XY", deviceDelegate: device, addToRootBlock: false)
     try await block.add(actionObject: xy)
+    // a role that cannot be part of an OSC address
+    let spaced = try await SwiftOCADevice.OcaGain(
+      role: "Ch 1",
+      deviceDelegate: device,
+      addToRootBlock: false
+    )
+    try await block.add(actionObject: spaced)
   }
 }
 
@@ -395,6 +402,15 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     let addresses = Set(messages.map(\.message.addressPattern.stringValue))
     XCTAssertTrue(addresses.contains("/Block/Gain/gain"))
     XCTAssertTrue(addresses.contains("/Block/Mute/state"))
+    // a role with a space is not found by a wildcard, as no address can name it
+    XCTAssertFalse(addresses.contains("/Block/Ch 1/gain"))
+  }
+
+  func testARoleThatIsNotAnAddressPartIsStillNamedDirectly() async throws {
+    try await send(OSCMessage("/Block/Ch 1/gain", values: [Float(-7)]))
+    try await send(OSCMessage("/Block/Ch 1/gain"))
+    let messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map { $0.message.values as? [Float] }, [[-7]])
   }
 
   func testVectorPropertyConvertsEachComponent() async throws {

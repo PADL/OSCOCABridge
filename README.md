@@ -26,7 +26,7 @@ Errors are reported to the sender as `/error ,ss <address> <reason>`.
 /unsubscribe ,s <address>… [,i port]
 ```
 
-`/subscribe` sends the sender the current value of each property named, then every change to it, on the address as it was subscribed with. Addresses may use OSC wildcards (`/Block/*/gain`); with none, every property is subscribed to. Changes are sent to the sender's address, or to the given port on its host, for a client such as TouchOSC that receives on a port of its own. `/unsubscribe` with no addresses removes all of the sender's subscriptions.
+`/subscribe` sends the sender the current value of each property named, then every change to it, on the address as it was subscribed with. Addresses may use OSC wildcards (`/Block/*/gain`); with none, every property is subscribed to. A wildcard only finds objects whose roles can be part of an OSC address: printable ASCII without a space or any of `#*,/?[]{}`. Naming such an object directly still works, as far as its role can be written. Changes are sent to the sender's address, or to the given port on its host, for a client such as TouchOSC that receives on a port of its own. `/unsubscribe` with no addresses removes all of the sender's subscriptions.
 
 `OSCOCABridge(address:subscriptionLifetime:)` can expire a client's subscriptions once nothing has been heard from its host for that long. `addDestination(_:patterns:)` sends changes to a fixed address without the client subscribing. Such a destination lasts until `removeDestination(_:)`, across `stop()` and `run()` and whatever the client subscribes to or from itself, and is sent its current values each time the bridge runs; `stop()` removes clients' subscriptions.
 

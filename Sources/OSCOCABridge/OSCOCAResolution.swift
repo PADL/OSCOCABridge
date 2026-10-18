@@ -94,14 +94,15 @@ extension SwiftOCADevice.OcaRoot {
   }
 }
 
-/// Every object in `container` and the blocks within it, with its role path.
+/// Every object in `container` and the blocks within it, with its role path. One whose
+/// role cannot be part of an OSC address is left out, with whatever is within it.
 @OcaDevice
 func oscObjects(
   in container: any OcaBlockContainer,
   rolePath: OcaNamePath = []
 ) -> [(rolePath: OcaNamePath, object: SwiftOCADevice.OcaRoot)] {
   var objects = [(rolePath: OcaNamePath, object: SwiftOCADevice.OcaRoot)]()
-  for member in container.actionObjects {
+  for member in container.actionObjects where member.role.isOSCAddressPart {
     let memberRolePath = rolePath + [member.role]
     objects.append((memberRolePath, member))
     if let member = member as? any OcaBlockContainer {
