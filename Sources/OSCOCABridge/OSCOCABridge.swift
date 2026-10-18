@@ -95,9 +95,11 @@ public actor OSCOCABridge {
   /// The index a change event is answered from. A vector property is entered under both of
   /// its component IDs.
   private var recipients = [PropertyKey: PropertyRecipients]()
-  /// How many subscriptions there are to each emitter's events, over all peers; the bridge
-  /// holds one OCA subscription for each emitter with any.
+  /// How many subscriptions there are to each emitter's events, over all peers.
   private var emitterSubscriptionCounts = [OcaONo: Int]()
+  /// The emitters the bridge holds an OCA subscription to, or is making one to: one for
+  /// each emitter with any subscriptions. See `syncEmitter`.
+  private var subscribedEmitters = Set<OcaONo>()
 
   /// `subscriptionLifetime` is how long a peer's subscriptions last after the last datagram
   /// from its host; nil, the default, keeps them until it unsubscribes or the bridge stops.
@@ -466,35 +468,12 @@ public actor OSCOCABridge {
     guard !resolved.isEmpty else { throw Ocp1Error.status(.badONo) }
     let host = try destination.presentationAddressNoPort
 
-    // the emitters first: a subscription is only kept once the device will raise its events
-    var retained = [Subscription]()
-    do {
-      for subscription in resolved.keys
-        where peers[destination]?.subscriptions[subscription] == nil
-      {
-        try await retainEmitter(subscription.oNo)
-        retained.append(subscription)
-      }
-    } catch {
-      for subscription in retained {
-        await releaseEmitter(subscription.oNo)
-      }
-      throw error
-    }
-
-    // the peer is read and written back with nothing awaited between, as it may have been
-    // removed, or subscribed to more, while the emitters were retained: another /subscribe
-    // from the same peer, run meanwhile, may have added a subscription this one also
-    // retained, whose extra retain is given back
+    // recorded with nothing awaited, so another /subscribe run meanwhile sees them
     var peer = peers[destination] ?? Peer(host: host)
     peer.lastSeen = .now
     peer.isStatic = peer.isStatic || isStatic
-    var alreadySubscribed = [OcaONo]()
-    for subscription in retained {
-      guard peer.subscriptions[subscription] == nil, let descriptor = resolved[subscription] else {
-        alreadySubscribed.append(subscription.oNo)
-        continue
-      }
+    var added = [Subscription]()
+    for (subscription, descriptor) in resolved where peer.subscriptions[subscription] == nil {
       peer.subscriptions[subscription] = descriptor
       let recipient = Recipient(destination: destination, subscription: subscription)
       for propertyID in [descriptor.propertyID, descriptor.yPropertyID].compactMap({ $0 }) {
@@ -503,11 +482,25 @@ public actor OSCOCABridge {
           default: PropertyRecipients(descriptor: descriptor)
         ].recipients.insert(recipient)
       }
+      emitterSubscriptionCounts[subscription.oNo, default: 0] += 1
+      added.append(subscription)
     }
     peers[destination] = peer
     peersByHost[host, default: []].insert(destination)
-    for oNo in alreadySubscribed {
-      await releaseEmitter(oNo)
+
+    do {
+      for oNo in Set(added.map(\.oNo)) {
+        try await syncEmitter(oNo)
+      }
+    } catch {
+      // what this call added is taken back; the device will not raise its events
+      for subscription in added {
+        await remove(subscription, of: destination)
+      }
+      if peers[destination]?.subscriptions.isEmpty == true, !isStatic {
+        await removePeer(destination)
+      }
+      throw error
     }
 
     // the current values, which a newly subscribed peer would otherwise not have
@@ -548,7 +541,9 @@ public actor OSCOCABridge {
       recipients[key]?.recipients.remove(recipient)
       if recipients[key]?.recipients.isEmpty == true { recipients[key] = nil }
     }
-    await releaseEmitter(subscription.oNo)
+    let count = emitterSubscriptionCounts[subscription.oNo, default: 1] - 1
+    emitterSubscriptionCounts[subscription.oNo] = count > 0 ? count : nil
+    try? await syncEmitter(subscription.oNo)
   }
 
   private func removePeer(_ destination: AnySocketAddress) async {
@@ -569,23 +564,24 @@ public actor OSCOCABridge {
     ))
   }
 
-  private func retainEmitter(_ oNo: OcaONo) async throws {
-    let count = emitterSubscriptionCounts[oNo, default: 0]
-    if count == 0 {
+  /// Brings the bridge's OCA subscription to an emitter into line with how many
+  /// subscriptions there are to it: made for the first, removed after the last. The
+  /// emitter joins `subscribedEmitters` before the device is asked, so that a call run
+  /// meanwhile for the same emitter does not ask twice.
+  private func syncEmitter(_ oNo: OcaONo) async throws {
+    if emitterSubscriptionCounts[oNo] != nil {
+      guard subscribedEmitters.insert(oNo).inserted else { return }
       guard let subscriptionManager = await device.subscriptionManager else {
+        subscribedEmitters.remove(oNo)
         throw Ocp1Error.status(.deviceError)
       }
-      try await subscriptionManager.addSubscription(emitterSubscription(oNo), for: self)
-    }
-    emitterSubscriptionCounts[oNo] = count + 1
-  }
-
-  private func releaseEmitter(_ oNo: OcaONo) async {
-    guard let count = emitterSubscriptionCounts[oNo] else { return }
-    if count > 1 {
-      emitterSubscriptionCounts[oNo] = count - 1
-    } else {
-      emitterSubscriptionCounts[oNo] = nil
+      do {
+        try await subscriptionManager.addSubscription(emitterSubscription(oNo), for: self)
+      } catch {
+        subscribedEmitters.remove(oNo)
+        throw error
+      }
+    } else if subscribedEmitters.remove(oNo) != nil {
       await device.subscriptionManager?.removeSubscription(emitterSubscription(oNo), for: self)
     }
   }
