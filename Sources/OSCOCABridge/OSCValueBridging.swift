@@ -60,57 +60,16 @@ extension OSCValues {
 
 /// Converts property values between their OCA types and OSC arguments.
 enum OSCValueBridge {
-  /// The OSC arguments for an OCA value: OSC scalars as they are, other integers as
-  /// `Int32` (or `Int64` if they do not fit), enumerations as their raw values, and
-  /// collections and records as their elements, in order. Anything else is sent as a
-  /// blob holding its OCP.1 encoding.
+  /// The OSC arguments for an OCA value, as `OSCValueEncoder` flattens it: a record gives
+  /// its fields, a collection its elements, an enumeration its raw value. A value with
+  /// nothing OSC can carry is sent as a blob holding its OCP.1 encoding.
   static func oscValues(from value: Any) throws -> OSCValues {
-    if let values = scalarOSCValue(from: value) {
-      return [values]
-    } else if let value = value as? any RawRepresentable {
-      return try oscValues(from: rawValue(of: value))
-    } else if let elements = value as? [Any] {
-      return try elements.flatMap { try oscValues(from: $0) }
-    }
-
-    let mirror = Mirror(reflecting: value)
-    if mirror.displayStyle == .struct, !mirror.children.isEmpty,
-       let values = try? mirror.children.flatMap({ try oscValues(from: $0.value) })
-    {
-      return values
-    } else if let value = value as? Encodable {
+    guard let value = value as? Encodable else { throw Ocp1Error.status(.badFormat) }
+    do {
+      return try OSCValueEncoder().encode(value)
+    } catch is OSCValueEncoder.Unsupported {
       return try [value._ocp1Encoded]
     }
-
-    throw Ocp1Error.status(.badFormat)
-  }
-
-  private static func scalarOSCValue(from value: Any) -> (any OSCValue)? {
-    switch value {
-    case let value as Bool: value
-    case let value as Float: value
-    case let value as Double: value
-    case let value as String: value
-    case let value as Data: value
-    case let value as Int32: value
-    case let value as Int64: value
-    case let value as any FixedWidthInteger: oscInteger(value)
-    default: nil
-    }
-  }
-
-  private static func oscInteger(_ value: some FixedWidthInteger) -> any OSCValue {
-    if let value = Int32(exactly: value) {
-      value
-    } else if let value = Int64(exactly: value) {
-      value
-    } else {
-      Int64.max // only a UInt64 above Int64.max
-    }
-  }
-
-  private static func rawValue(of value: some RawRepresentable) -> Any {
-    value.rawValue
   }
 
   /// The OCA value of `type` that OSC arguments set. A single argument is converted:
@@ -126,18 +85,13 @@ enum OSCValueBridge {
   }
 
   private static func scalarValue<T>(_ type: T.Type, from value: any OSCValue) throws -> T? {
-    let result: Any? = if T.self == Bool.self {
-      try boolValue(from: value)
-    } else if T.self == String.self {
-      value as? String
-    } else if let type = T.self as? any BinaryFloatingPoint.Type {
-      try floatingPointValue(type, from: value)
-    } else if let type = T.self as? any FixedWidthInteger.Type {
-      try integerValue(type, from: value)
-    } else if let type = T.self as? any RawRepresentable.Type {
-      try enumerationValue(type, from: value)
-    } else {
-      nil
+    let result: Any? = switch T.self {
+    case is Bool.Type: try boolValue(from: value)
+    case is String.Type: value as? String
+    case let type as any BinaryFloatingPoint.Type: try floatingPointValue(type, from: value)
+    case let type as any FixedWidthInteger.Type: try integerValue(type, from: value)
+    case let type as any RawRepresentable.Type: try enumerationValue(type, from: value)
+    default: nil
     }
     return result as? T
   }

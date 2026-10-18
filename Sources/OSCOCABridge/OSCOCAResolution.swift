@@ -24,11 +24,35 @@ enum OSCOCAMember: Sendable {
   case property(OcaDevicePropertyDescriptor)
 }
 
+/// A class's property and method descriptors, which are the class's and not the instance's,
+/// so are built once for each class rather than for each message.
+private struct OSCOCAClassDescriptors {
+  let properties: [OcaDevicePropertyDescriptor]
+  let visibleProperties: [OcaDevicePropertyDescriptor]
+  let methods: [OcaDeviceMethodDescriptor]
+}
+
+@OcaDevice
+private var classDescriptorCache = [ObjectIdentifier: OSCOCAClassDescriptors]()
+
 extension SwiftOCADevice.OcaRoot {
+  private var oscClassDescriptors: OSCOCAClassDescriptors {
+    let key = ObjectIdentifier(type(of: self))
+    if let descriptors = classDescriptorCache[key] { return descriptors }
+    let properties = devicePropertyDescriptors
+    let descriptors = OSCOCAClassDescriptors(
+      properties: properties,
+      visibleProperties: properties.filter { !$0.flags.contains(.hidden) },
+      methods: deviceMethodDescriptors
+    )
+    classDescriptorCache[key] = descriptors
+    return descriptors
+  }
+
   /// The properties introspection shows, which a wildcard subscription is matched against.
   /// A hidden property is still there to be named: hidden means not advertised.
   var oscVisibleProperties: [OcaDevicePropertyDescriptor] {
-    devicePropertyDescriptors.filter { !$0.flags.contains(.hidden) }
+    oscClassDescriptors.visibleProperties
   }
 
   /// Resolves an address leaf against this object: a method ID, a property ID, a
@@ -39,15 +63,17 @@ extension SwiftOCADevice.OcaRoot {
     case let .methodID(methodID):
       return .method(methodID)
     case let .propertyID(propertyID):
-      return devicePropertyDescriptors
+      return oscClassDescriptors.properties
         .first { $0.propertyID == propertyID || $0.yPropertyID == propertyID }
         .map { .property($0) }
     case let .name(name):
-      let properties = devicePropertyDescriptors
+      let properties = oscClassDescriptors.properties
       if let property = properties.first(where: { $0.name == name }) {
         return .property(property)
       }
-      if let method = deviceMethodDescriptors.first(where: { $0.name.lowerCamelCased == name }) {
+      if let method = oscClassDescriptors.methods
+        .first(where: { $0.name.lowerCamelCased == name })
+      {
         return .method(method.methodID)
       }
       for property in properties {

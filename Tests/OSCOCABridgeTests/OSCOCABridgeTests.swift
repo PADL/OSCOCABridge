@@ -453,6 +453,52 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     XCTAssertEqual(messages.first?.message.values.first as? String, "/subscribe")
   }
 
+  func testErrorIsNotAnswered() async throws {
+    try await send(OSCMessage("/error", values: ["/Block/Gain/volume", "badMethod"]))
+    let messages = await outbox.messages(count: 1, timeout: .milliseconds(200))
+    XCTAssertTrue(messages.isEmpty)
+  }
+
+  func testResubscribingAfterUnsubscribing() async throws {
+    // the bridge's subscription to the object is made and removed each time
+    for value in [Float(-30), Float(-31), Float(-32)] {
+      try await send(OSCMessage("/subscribe", values: ["/Block/Gain/gain", Int32(9001)]))
+      _ = await outbox.messages(count: 1)
+      await outbox.removeAll()
+      try await send(OSCMessage("/Block/Gain/gain", values: [value]), from: otherClient)
+      let messages = await outbox.messages(count: 1)
+      XCTAssertEqual(messages.map { $0.message.values as? [Float] }, [[value]])
+      await outbox.removeAll()
+      try await send(OSCMessage("/unsubscribe", values: [Int32(9001)]))
+    }
+  }
+
+  func testStopKeepsStaticDestinations() async throws {
+    let destination = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:9400"
+    )
+    try await send(OSCMessage("/Block/Mute/state", values: [false]))
+    try await bridge.addDestination(destination, patterns: ["/Block/Mute/state"])
+    try await send(OSCMessage("/subscribe", values: ["/Block/Mute/state", Int32(9001)]))
+    _ = await outbox.messages(count: 2)
+
+    await bridge.stop()
+    await outbox.removeAll()
+    // as run() would: drain again, with a new socket
+    let outbox = outbox!
+    await bridge.startOutbound()
+    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+
+    try await send(OSCMessage("/Block/Mute/state", values: [true]))
+    let messages = await outbox.messages(count: 1)
+    // the destination was kept; the peer's subscription went with the stop
+    let late = await outbox.messages(count: 2, timeout: .milliseconds(200))
+    XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9400"])
+    XCTAssertEqual(late.count, 1)
+    await bridge.removeDestination(destination)
+  }
+
   func testStaticDestination() async throws {
     let destination = try AnySocketAddress(
       family: sa_family_t(AF_INET),

@@ -38,11 +38,21 @@ let MaxMessageSize = 1500
 /// members, a method by ID (`4.2` or `4m2`) or name (`setGain`), or a property by ID
 /// (`4p1`) or name (`gain`). A property is read with no arguments and written with them.
 /// `/subscribe` and `/unsubscribe` manage which property changes are sent to a peer.
+///
+/// The bridge runs on the device's executor, so that it can keep its subscriptions in step
+/// with the device's without awaiting it.
 public actor OSCOCABridge {
   let address: any SocketAddress
   let device: OcaDevice
   let subscriptionLifetime: Duration?
-  var task: Task<(), Error>?
+  var task: Task<(), Never>?
+  /// Which run of the event loop is current, so that one that has ended can tell whether
+  /// the sender it set is still the bridge's.
+  private var eventLoopGeneration = 0
+
+  public nonisolated var unownedExecutor: UnownedSerialExecutor {
+    OcaDevice.shared.unownedExecutor
+  }
 
   /// Sends a datagram from the bridge's socket, once the event loop has bound it.
   typealias Sender = @Sendable (Data, AnySocketAddress) async throws -> ()
@@ -92,19 +102,19 @@ public actor OSCOCABridge {
   /// The index a change event is answered from. A vector property is entered under both of
   /// its component IDs.
   private var recipients = [PropertyKey: PropertyRecipients]()
-  /// How many subscriptions there are to each emitter's events, over all peers.
+  /// How many subscriptions there are to each emitter's events, over all peers; the bridge
+  /// holds one OCA subscription for each emitter with any.
   private var emitterSubscriptionCounts = [OcaONo: Int]()
-  /// The emitters the bridge holds an OCA subscription to, or is making one to: one for
-  /// each emitter with any subscriptions. See `syncEmitter`.
-  private var subscribedEmitters = Set<OcaONo>()
 
   /// `subscriptionLifetime` is how long a peer's subscriptions last after the last datagram
   /// from its host; nil, the default, keeps them until it unsubscribes or the bridge stops.
+  /// `device` must be `OcaDevice.shared`, whose executor the bridge runs on.
   public init(
     address: any SocketAddress,
     device: OcaDevice,
     subscriptionLifetime: Duration? = nil
   ) {
+    precondition(device === OcaDevice.shared, "OSCOCABridge runs on OcaDevice.shared")
     self.address = address
     self.device = device
     self.subscriptionLifetime = subscriptionLifetime
@@ -119,21 +129,33 @@ public actor OSCOCABridge {
 
   public func run() {
     task?.cancel()
+    sender = nil
+    eventLoopGeneration += 1
+    let generation = eventLoopGeneration
     startOutbound()
     startSweeping()
     task = Task {
-      try await udpEventLoop(address: address, with: self)
+      try? await udpEventLoop(address: address, with: self)
+      eventLoopEnded(generation)
     }
   }
 
-  public func stop() async {
+  /// The socket an event loop sent from has gone with it.
+  private func eventLoopEnded(_ generation: Int) {
+    guard generation == eventLoopGeneration else { return }
+    sender = nil
+  }
+
+  /// Stops the bridge. Its peers' subscriptions are removed; destinations added with
+  /// `addDestination(_:patterns:)` are kept, and are sent changes again once it runs.
+  public func stop() {
     task?.cancel()
     task = nil
     sweepTask?.cancel()
     sweepTask = nil
     for (host, destinations) in peers {
-      for destination in destinations.keys {
-        await removePeer(destination, on: host)
+      for (destination, peer) in destinations where !peer.isStatic {
+        removePeer(destination, on: host)
       }
     }
     outbound?.finish()
@@ -159,9 +181,9 @@ public actor OSCOCABridge {
     try await subscribe(AnySocketAddress(destination), to: patterns, isStatic: true)
   }
 
-  public func removeDestination(_ destination: any SocketAddress) async {
+  public func removeDestination(_ destination: any SocketAddress) {
     guard let host = try? destination.presentationAddressNoPort else { return }
-    await removePeer(AnySocketAddress(destination), on: host)
+    removePeer(AnySocketAddress(destination), on: host)
   }
 
   // MARK: - inbound
@@ -174,17 +196,19 @@ public actor OSCOCABridge {
       case let .unsubscribe(patterns, port):
         let host = try source.presentationAddressNoPort
         if let port {
-          try await unsubscribe(destination(for: source, port: port), on: host, from: patterns)
+          try unsubscribe(destination(for: source, port: port), on: host, from: patterns)
         } else {
           // the sender's subscriptions, whichever port it had them sent to
           for destination in peers[host].map({ Array($0.keys) }) ?? [] {
-            try await unsubscribe(destination, on: host, from: patterns)
+            unsubscribe(destination, on: host, from: patterns)
           }
         }
       case let .member(rolePath, leaf):
         try await handle(message, rolePath: rolePath, leaf: leaf, from: source)
       }
     } catch {
+      // an /error is not answered, lest two bridges answer each other's forever
+      guard message.addressPattern.stringValue != "/error" else { return }
       let reason = if case let Ocp1Error.status(status) = error {
         String(describing: status)
       } else {
@@ -211,8 +235,8 @@ public actor OSCOCABridge {
     }
 
     let source = AnySocketAddress(source)
-    if subscriptionLifetime != nil {
-      try renew(host: source.presentationAddressNoPort)
+    if subscriptionLifetime != nil, let host = try? source.presentationAddressNoPort {
+      renew(host: host)
     }
     await _handle(message: message, from: source)
   }
@@ -234,17 +258,17 @@ public actor OSCOCABridge {
     leaf: OSCOCAAddressLeaf,
     from source: AnySocketAddress
   ) async throws {
-    let (oNo, member) = try await resolve(rolePath: rolePath, leaf: leaf)
+    let (object, member) = try await resolve(rolePath: rolePath, leaf: leaf)
 
     switch member {
     case let .method(methodID):
-      try await invoke(methodID, on: oNo, with: message)
+      try await invoke(methodID, on: object, with: message)
     case let .property(descriptor):
       if message.values.isEmpty {
-        let values = try await get(descriptor, of: oNo)
+        let values = try await get(descriptor, of: object)
         send(OSCMessage(message.addressPattern, values: values), to: source)
       } else {
-        try await set(descriptor, of: oNo, from: message)
+        try await set(descriptor, of: object, from: message)
       }
     }
   }
@@ -252,7 +276,7 @@ public actor OSCOCABridge {
   private func resolve(
     rolePath: OcaNamePath,
     leaf: OSCOCAAddressLeaf
-  ) async throws -> (OcaONo, OSCOCAMember) {
+  ) async throws -> (SwiftOCADevice.OcaRoot, OSCOCAMember) {
     guard let rootBlock = await device.rootBlock else {
       throw Ocp1Error.status(.deviceError)
     }
@@ -268,7 +292,7 @@ public actor OSCOCABridge {
     guard let member = await object.oscMember(for: leaf) else {
       throw Ocp1Error.status(.badMethod)
     }
-    return (oNo, member)
+    return (object, member)
   }
 
   // MARK: - methods and properties
@@ -299,12 +323,12 @@ public actor OSCOCABridge {
   /// object bridges them itself.
   private func invoke(
     _ methodID: OcaMethodID,
-    on oNo: OcaONo,
+    on object: SwiftOCADevice.OcaRoot,
     with message: OSCMessage
   ) async throws {
     var parameters: (count: Int, data: Data)?
 
-    if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
+    if let object = object as? OSCOCACustomBridgeable {
       do {
         let values = try await object.ocaParameters(for: methodID, from: message)
         parameters = try (values.count, values.map { $0 as any Encodable }._ocp1Encoded)
@@ -312,29 +336,39 @@ public actor OSCOCABridge {
     }
 
     let (count, data) = try parameters ?? (message.values.count, message.values._ocp1Encoded)
-    _ = try await perform(methodID, on: oNo, parameterCount: count, parameterData: data)
+    _ = try await perform(
+      methodID,
+      on: object.objectNumber,
+      parameterCount: count,
+      parameterData: data
+    )
   }
 
   /// The property's value as OSC arguments. A bounded property's getter answers with its
   /// range after the value, which is left out.
   private func get(
     _ descriptor: OcaDevicePropertyDescriptor,
-    of oNo: OcaONo
+    of object: SwiftOCADevice.OcaRoot
   ) async throws -> OSCValues {
     guard let getMethodID = descriptor.getMethodID else {
       throw Ocp1Error.status(.notImplemented)
     }
-    let response = try await perform(getMethodID, on: oNo, parameterCount: 0, parameterData: Data())
+    let response = try await perform(
+      getMethodID,
+      on: object.objectNumber,
+      parameterCount: 0,
+      parameterData: Data()
+    )
     let value = try Ocp1Decoder().decode(
       descriptor.valueType,
       from: response.parameters.parameterData
     )
-    return try await oscValues(from: value, of: descriptor, on: oNo)
+    return try await oscValues(from: value, of: descriptor, on: object)
   }
 
   private func set(
     _ descriptor: OcaDevicePropertyDescriptor,
-    of oNo: OcaONo,
+    of object: SwiftOCADevice.OcaRoot,
     from message: OSCMessage
   ) async throws {
     guard let setMethodID = descriptor.setMethodID else {
@@ -342,7 +376,7 @@ public actor OSCOCABridge {
     }
 
     var value: (any Encodable & Sendable)?
-    if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
+    if let object = object as? OSCOCACustomBridgeable {
       do {
         value = try await object.ocaValue(for: descriptor.propertyID, from: message)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
@@ -364,7 +398,7 @@ public actor OSCOCABridge {
     }
     _ = try await perform(
       setMethodID,
-      on: oNo,
+      on: object.objectNumber,
       parameterCount: parameterCount,
       parameterData: encoded
     )
@@ -373,9 +407,9 @@ public actor OSCOCABridge {
   private func oscValues(
     from value: any Sendable,
     of descriptor: OcaDevicePropertyDescriptor,
-    on oNo: OcaONo
+    on object: SwiftOCADevice.OcaRoot
   ) async throws -> OSCValues {
-    if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
+    if let object = object as? OSCOCACustomBridgeable {
       do {
         return try await object.oscValues(for: descriptor.propertyID, from: value)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
@@ -415,17 +449,26 @@ public actor OSCOCABridge {
   /// by name and by ID. No patterns names every such property.
   private func resolve(
     patterns: [String]
-  ) async throws -> [Subscription: OcaDevicePropertyDescriptor] {
-    var resolved = [Subscription: OcaDevicePropertyDescriptor]()
+  ) async throws -> [Subscription: (
+    object: SwiftOCADevice.OcaRoot,
+    descriptor: OcaDevicePropertyDescriptor
+  )] {
+    var resolved = [Subscription: (
+      object: SwiftOCADevice.OcaRoot,
+      descriptor: OcaDevicePropertyDescriptor
+    )]()
 
     for pattern in patterns where !pattern.isOSCAddressPattern {
       let (rolePath, leaf) = try OSCOCARequest.member(OSCAddressPattern(pattern).pathComponents)
-      let (oNo, member) = try await resolve(rolePath: rolePath, leaf: leaf)
+      let (object, member) = try await resolve(rolePath: rolePath, leaf: leaf)
       guard case let .property(descriptor) = member else {
         throw Ocp1Error.status(.badMethod)
       }
-      resolved[Subscription(oNo: oNo, propertyID: descriptor.propertyID, address: pattern)] =
-        descriptor
+      resolved[Subscription(
+        oNo: object.objectNumber,
+        propertyID: descriptor.propertyID,
+        address: pattern
+      )] = (object, descriptor)
     }
 
     let wildcards = patterns.filter(\.isOSCAddressPattern).map { OSCAddressPattern($0) }
@@ -451,7 +494,7 @@ public actor OSCOCABridge {
             oNo: object.objectNumber,
             propertyID: descriptor.propertyID,
             address: address
-          )] = descriptor
+          )] = (object, descriptor)
         }
       }
     }
@@ -459,6 +502,8 @@ public actor OSCOCABridge {
     return resolved
   }
 
+  /// The peer is changed and the device subscribed to with nothing awaited, so another
+  /// call cannot run in between and see them out of step.
   private func subscribe(
     _ destination: AnySocketAddress,
     to patterns: [String],
@@ -468,12 +513,24 @@ public actor OSCOCABridge {
     guard !resolved.isEmpty else { throw Ocp1Error.status(.badONo) }
     let host = try destination.presentationAddressNoPort
 
-    // recorded with nothing awaited, so another /subscribe run meanwhile sees them
     var peer = peers[host]?[destination] ?? Peer()
+    let added = resolved.filter { peer.subscriptions[$0.key] == nil }
+    var retained = [OcaONo]()
+    do {
+      for subscription in added.keys {
+        try retainEmitter(subscription.oNo)
+        retained.append(subscription.oNo)
+      }
+    } catch {
+      for oNo in retained {
+        releaseEmitter(oNo)
+      }
+      throw error
+    }
+
     peer.lastSeen = .now
     peer.isStatic = peer.isStatic || isStatic
-    var added = [Subscription]()
-    for (subscription, descriptor) in resolved where peer.subscriptions[subscription] == nil {
+    for (subscription, (_, descriptor)) in added {
       peer.subscriptions[subscription] = descriptor
       let recipient = Recipient(destination: destination, subscription: subscription)
       for propertyID in [descriptor.propertyID, descriptor.yPropertyID].compactMap({ $0 }) {
@@ -482,29 +539,12 @@ public actor OSCOCABridge {
           default: PropertyRecipients(descriptor: descriptor)
         ].recipients.insert(recipient)
       }
-      emitterSubscriptionCounts[subscription.oNo, default: 0] += 1
-      added.append(subscription)
     }
     peers[host, default: [:]][destination] = peer
 
-    do {
-      for oNo in Set(added.map(\.oNo)) {
-        try await syncEmitter(oNo)
-      }
-    } catch {
-      // what this call added is taken back; the device will not raise its events
-      for subscription in added {
-        await remove(subscription, of: destination, on: host)
-      }
-      if peers[host]?[destination]?.subscriptions.isEmpty == true, !isStatic {
-        await removePeer(destination, on: host)
-      }
-      throw error
-    }
-
     // the current values, which a newly subscribed peer would otherwise not have
-    for (subscription, descriptor) in resolved {
-      if let values = try? await get(descriptor, of: subscription.oNo) {
+    for (subscription, (object, descriptor)) in resolved {
+      if let values = try? await get(descriptor, of: object) {
         send(OSCMessage(subscription.address, values: values), to: destination)
       }
     }
@@ -516,10 +556,10 @@ public actor OSCOCABridge {
     _ destination: AnySocketAddress,
     on host: String,
     from patterns: [String]
-  ) async throws {
+  ) {
     guard let peer = peers[host]?[destination], !peer.isStatic else { return }
     guard !patterns.isEmpty else {
-      await removePeer(destination, on: host)
+      removePeer(destination, on: host)
       return
     }
 
@@ -528,10 +568,10 @@ public actor OSCOCABridge {
       patterns.contains { $0.matches(localAddress: subscription.address) }
     }
     for subscription in removed {
-      await remove(subscription, of: destination, on: host)
+      remove(subscription, of: destination, on: host)
     }
     if peers[host]?[destination]?.subscriptions.isEmpty == true {
-      await removePeer(destination, on: host)
+      removePeer(destination, on: host)
     }
   }
 
@@ -539,7 +579,7 @@ public actor OSCOCABridge {
     _ subscription: Subscription,
     of destination: AnySocketAddress,
     on host: String
-  ) async {
+  ) {
     guard let descriptor = peers[host]?[destination]?.subscriptions
       .removeValue(forKey: subscription)
     else { return }
@@ -549,15 +589,13 @@ public actor OSCOCABridge {
       recipients[key]?.recipients.remove(recipient)
       if recipients[key]?.recipients.isEmpty == true { recipients[key] = nil }
     }
-    let count = emitterSubscriptionCounts[subscription.oNo, default: 1] - 1
-    emitterSubscriptionCounts[subscription.oNo] = count > 0 ? count : nil
-    try? await syncEmitter(subscription.oNo)
+    releaseEmitter(subscription.oNo)
   }
 
-  private func removePeer(_ destination: AnySocketAddress, on host: String) async {
+  private func removePeer(_ destination: AnySocketAddress, on host: String) {
     guard let peer = peers[host]?[destination] else { return }
     for subscription in peer.subscriptions.keys {
-      await remove(subscription, of: destination, on: host)
+      remove(subscription, of: destination, on: host)
     }
     peers[host]?[destination] = nil
     if peers[host]?.isEmpty == true { peers[host] = nil }
@@ -571,25 +609,38 @@ public actor OSCOCABridge {
     ))
   }
 
-  /// Brings the bridge's OCA subscription to an emitter into line with how many
-  /// subscriptions there are to it: made for the first, removed after the last. The
-  /// emitter joins `subscribedEmitters` before the device is asked, so that a call run
-  /// meanwhile for the same emitter does not ask twice.
-  private func syncEmitter(_ oNo: OcaONo) async throws {
-    if emitterSubscriptionCounts[oNo] != nil {
-      guard subscribedEmitters.insert(oNo).inserted else { return }
-      guard let subscriptionManager = await device.subscriptionManager else {
-        subscribedEmitters.remove(oNo)
-        throw Ocp1Error.status(.deviceError)
-      }
-      do {
-        try await subscriptionManager.addSubscription(emitterSubscription(oNo), for: self)
-      } catch {
-        subscribedEmitters.remove(oNo)
-        throw error
-      }
-    } else if subscribedEmitters.remove(oNo) != nil {
-      await device.subscriptionManager?.removeSubscription(emitterSubscription(oNo), for: self)
+  /// The device's subscription manager, read on its executor, which is the bridge's.
+  private var subscriptionManager: SwiftOCADevice.OcaSubscriptionManager? {
+    device.assumeIsolated { $0.subscriptionManager }
+  }
+
+  private func retainEmitter(_ oNo: OcaONo) throws {
+    let count = emitterSubscriptionCounts[oNo, default: 0]
+    if count == 0 {
+      guard let subscriptionManager else { throw Ocp1Error.status(.deviceError) }
+      let subscription = emitterSubscription(oNo)
+      try onDevice { try subscriptionManager.addSubscription(subscription, for: self) }
+    }
+    emitterSubscriptionCounts[oNo] = count + 1
+  }
+
+  private func releaseEmitter(_ oNo: OcaONo) {
+    guard let count = emitterSubscriptionCounts[oNo] else { return }
+    if count > 1 {
+      emitterSubscriptionCounts[oNo] = count - 1
+    } else {
+      emitterSubscriptionCounts[oNo] = nil
+      guard let subscriptionManager else { return }
+      let subscription = emitterSubscription(oNo)
+      onDevice { subscriptionManager.removeSubscription(subscription, for: self) }
+    }
+  }
+
+  /// Runs `operation` at once on the device's actor, as the bridge shares its executor.
+  private func onDevice<T>(_ operation: @OcaDevice () throws -> T) rethrows -> T {
+    OcaDevice.shared.preconditionIsolated()
+    return try withoutActuallyEscaping(operation) { operation in
+      try unsafeBitCast(operation, to: (() throws -> T).self)()
     }
   }
 
@@ -613,14 +664,14 @@ public actor OSCOCABridge {
     }
   }
 
-  private func sweep(lifetime: Duration) async {
+  private func sweep(lifetime: Duration) {
     let now = ContinuousClock.now
     let expired = peers.flatMap { host, destinations in
       destinations.filter { !$0.value.isStatic && now - $0.value.lastSeen > lifetime }
         .map { (host: host, destination: $0.key) }
     }
     for (host, destination) in expired {
-      await removePeer(destination, on: host)
+      removePeer(destination, on: host)
     }
   }
 
@@ -675,24 +726,26 @@ public actor OSCOCABridge {
             propertyID: propertyID
           )]
     else { return }
-    let oNo = notification.event.emitterONo
+    let key = PropertyKey(oNo: notification.event.emitterONo, propertyID: propertyID)
     let descriptor = property.descriptor
 
     let values: OSCValues
     do {
+      guard let object = await device.resolve(objectNumber: key.oNo) else { return }
       if descriptor.componentType != nil {
         guard propertyID == descriptor.yPropertyID else { return }
-        values = try await get(descriptor, of: oNo)
+        values = try await get(descriptor, of: object)
       } else {
         let (value, changeType) = try Self.decodePropertyChanged(descriptor.valueType, from: data)
         guard changeType == .currentChanged else { return }
-        values = try await oscValues(from: value, of: descriptor, on: oNo)
+        values = try await oscValues(from: value, of: descriptor, on: object)
       }
     } catch {
       return
     }
 
-    for recipient in property.recipients {
+    // read again: a peer may have gone while the value was read
+    for recipient in recipients[key]?.recipients ?? [] {
       send(OSCMessage(recipient.subscription.address, values: values), to: recipient.destination)
     }
   }
