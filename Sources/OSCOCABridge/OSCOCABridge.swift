@@ -58,7 +58,8 @@ public final class OSCOCABridge {
   private var senderWaiters = [CheckedContinuation<Sender?, Never>]()
   private var outbound: AsyncStream<(Data, AnySocketAddress)>.Continuation?
   private var outboundTask: Task<(), Never>?
-  private var sweepTask: Task<(), Never>?
+  /// Removes peers not heard from within `subscriptionLifetime`; none without one.
+  private var leaseExpiryTask: Task<(), Never>?
 
   /// A property change a peer is sent, on the address it subscribed with.
   struct Subscription: Hashable, Sendable {
@@ -151,7 +152,7 @@ public final class OSCOCABridge {
     eventLoopGeneration += 1
     let generation = eventLoopGeneration
     startOutbound()
-    startSweeping()
+    startExpiringLeases()
     let address = address
     task = Task {
       try? await udpEventLoop(address: address, with: self)
@@ -170,8 +171,8 @@ public final class OSCOCABridge {
   public func stop() {
     task?.cancel()
     task = nil
-    sweepTask?.cancel()
-    sweepTask = nil
+    leaseExpiryTask?.cancel()
+    leaseExpiryTask = nil
     for (host, destinations) in peers {
       for (destination, peer) in destinations where !peer.isStatic {
         removePeer(destination, on: host)
@@ -673,18 +674,20 @@ public final class OSCOCABridge {
     }
   }
 
-  private func startSweeping() {
-    sweepTask?.cancel()
+  /// Checks for lapsed leases twice a lifetime, so that none outlives it by more than half.
+  private func startExpiringLeases() {
+    leaseExpiryTask?.cancel()
     guard let subscriptionLifetime else { return }
-    sweepTask = Task { [weak self] in
+    leaseExpiryTask = Task { [weak self] in
       while !Task.isCancelled {
         try? await Task.sleep(for: subscriptionLifetime / 2)
-        await self?.sweep(lifetime: subscriptionLifetime)
+        await self?.expireLeases(olderThan: subscriptionLifetime)
       }
     }
   }
 
-  private func sweep(lifetime: Duration) {
+  /// Removes the peers not heard from within `lifetime`, other than fixed destinations.
+  private func expireLeases(olderThan lifetime: Duration) {
     let now = ContinuousClock.now
     let expired = peers.flatMap { host, destinations in
       destinations.filter { !$0.value.isStatic && now - $0.value.lastSeen > lifetime }
