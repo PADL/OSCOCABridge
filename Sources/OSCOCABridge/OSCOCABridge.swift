@@ -62,8 +62,6 @@ public actor OSCOCABridge {
   }
 
   struct Peer {
-    /// The host's presentation address, which `/unsubscribe` and renewal go by.
-    let host: String
     var subscriptions = [Subscription: OcaDevicePropertyDescriptor]()
     var lastSeen = ContinuousClock.now
     /// Added with `addDestination(_:patterns:)`; never expires.
@@ -82,10 +80,9 @@ public actor OSCOCABridge {
     let subscription: Subscription
   }
 
-  /// Peers by the address property changes are sent to.
-  private var peers = [AnySocketAddress: Peer]()
-  /// The peers on each host.
-  private var peersByHost = [String: Set<AnySocketAddress>]()
+  /// Peers by host, then by the address property changes are sent to: `/unsubscribe` and
+  /// renewal go by the host, as a peer need not send from the port it receives on.
+  private var peers = [String: [AnySocketAddress: Peer]]()
   /// A property and who is sent its changes.
   struct PropertyRecipients {
     let descriptor: OcaDevicePropertyDescriptor
@@ -134,8 +131,10 @@ public actor OSCOCABridge {
     task = nil
     sweepTask?.cancel()
     sweepTask = nil
-    for destination in Array(peers.keys) {
-      await removePeer(destination)
+    for (host, destinations) in peers {
+      for destination in destinations.keys {
+        await removePeer(destination, on: host)
+      }
     }
     outbound?.finish()
     outbound = nil
@@ -161,7 +160,8 @@ public actor OSCOCABridge {
   }
 
   public func removeDestination(_ destination: any SocketAddress) async {
-    await removePeer(AnySocketAddress(destination))
+    guard let host = try? destination.presentationAddressNoPort else { return }
+    await removePeer(AnySocketAddress(destination), on: host)
   }
 
   // MARK: - inbound
@@ -172,13 +172,13 @@ public actor OSCOCABridge {
       case let .subscribe(patterns, port):
         try await subscribe(destination(for: source, port: port), to: patterns)
       case let .unsubscribe(patterns, port):
+        let host = try source.presentationAddressNoPort
         if let port {
-          try await unsubscribe(destination(for: source, port: port), from: patterns)
+          try await unsubscribe(destination(for: source, port: port), on: host, from: patterns)
         } else {
           // the sender's subscriptions, whichever port it had them sent to
-          let host = try source.presentationAddressNoPort
-          for destination in peersByHost[host] ?? [] where peers[destination]?.isStatic == false {
-            try await unsubscribe(destination, from: patterns)
+          for destination in peers[host].map({ Array($0.keys) }) ?? [] {
+            try await unsubscribe(destination, on: host, from: patterns)
           }
         }
       case let .member(rolePath, leaf):
@@ -306,7 +306,7 @@ public actor OSCOCABridge {
 
     if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
       do {
-        let values = try await object.bridgeValues(from: message, for: methodID)
+        let values = try await object.ocaParameters(for: methodID, from: message)
         parameters = try (values.count, values.map { $0 as any Encodable }._ocp1Encoded)
       } catch OSCOCACustomBridgeableError.methodNotBridged {}
     }
@@ -344,7 +344,7 @@ public actor OSCOCABridge {
     var value: (any Encodable & Sendable)?
     if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
       do {
-        value = try await object.bridgeValue(from: message, for: descriptor.propertyID)
+        value = try await object.ocaValue(for: descriptor.propertyID, from: message)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
     }
     let encoded: Data
@@ -377,7 +377,7 @@ public actor OSCOCABridge {
   ) async throws -> OSCValues {
     if let object = await device.resolve(objectNumber: oNo) as? OSCOCACustomBridgeable {
       do {
-        return try await object.bridgeOSCValues(from: value, for: descriptor.propertyID)
+        return try await object.oscValues(for: descriptor.propertyID, from: value)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
     }
     return try OSCValueBridge.oscValues(from: value)
@@ -469,7 +469,7 @@ public actor OSCOCABridge {
     let host = try destination.presentationAddressNoPort
 
     // recorded with nothing awaited, so another /subscribe run meanwhile sees them
-    var peer = peers[destination] ?? Peer(host: host)
+    var peer = peers[host]?[destination] ?? Peer()
     peer.lastSeen = .now
     peer.isStatic = peer.isStatic || isStatic
     var added = [Subscription]()
@@ -485,8 +485,7 @@ public actor OSCOCABridge {
       emitterSubscriptionCounts[subscription.oNo, default: 0] += 1
       added.append(subscription)
     }
-    peers[destination] = peer
-    peersByHost[host, default: []].insert(destination)
+    peers[host, default: [:]][destination] = peer
 
     do {
       for oNo in Set(added.map(\.oNo)) {
@@ -495,10 +494,10 @@ public actor OSCOCABridge {
     } catch {
       // what this call added is taken back; the device will not raise its events
       for subscription in added {
-        await remove(subscription, of: destination)
+        await remove(subscription, of: destination, on: host)
       }
-      if peers[destination]?.subscriptions.isEmpty == true, !isStatic {
-        await removePeer(destination)
+      if peers[host]?[destination]?.subscriptions.isEmpty == true, !isStatic {
+        await removePeer(destination, on: host)
       }
       throw error
     }
@@ -513,10 +512,14 @@ public actor OSCOCABridge {
 
   /// A destination added with `addDestination(_:patterns:)` is only removed by
   /// `removeDestination(_:)`, not by a peer's `/unsubscribe`.
-  private func unsubscribe(_ destination: AnySocketAddress, from patterns: [String]) async throws {
-    guard let peer = peers[destination], !peer.isStatic else { return }
+  private func unsubscribe(
+    _ destination: AnySocketAddress,
+    on host: String,
+    from patterns: [String]
+  ) async throws {
+    guard let peer = peers[host]?[destination], !peer.isStatic else { return }
     guard !patterns.isEmpty else {
-      await removePeer(destination)
+      await removePeer(destination, on: host)
       return
     }
 
@@ -525,15 +528,20 @@ public actor OSCOCABridge {
       patterns.contains { $0.matches(localAddress: subscription.address) }
     }
     for subscription in removed {
-      await remove(subscription, of: destination)
+      await remove(subscription, of: destination, on: host)
     }
-    if peers[destination]?.subscriptions.isEmpty == true {
-      await removePeer(destination)
+    if peers[host]?[destination]?.subscriptions.isEmpty == true {
+      await removePeer(destination, on: host)
     }
   }
 
-  private func remove(_ subscription: Subscription, of destination: AnySocketAddress) async {
-    guard let descriptor = peers[destination]?.subscriptions.removeValue(forKey: subscription)
+  private func remove(
+    _ subscription: Subscription,
+    of destination: AnySocketAddress,
+    on host: String
+  ) async {
+    guard let descriptor = peers[host]?[destination]?.subscriptions
+      .removeValue(forKey: subscription)
     else { return }
     let recipient = Recipient(destination: destination, subscription: subscription)
     for propertyID in [descriptor.propertyID, descriptor.yPropertyID].compactMap({ $0 }) {
@@ -546,14 +554,13 @@ public actor OSCOCABridge {
     try? await syncEmitter(subscription.oNo)
   }
 
-  private func removePeer(_ destination: AnySocketAddress) async {
-    guard let peer = peers[destination] else { return }
+  private func removePeer(_ destination: AnySocketAddress, on host: String) async {
+    guard let peer = peers[host]?[destination] else { return }
     for subscription in peer.subscriptions.keys {
-      await remove(subscription, of: destination)
+      await remove(subscription, of: destination, on: host)
     }
-    peers[destination] = nil
-    peersByHost[peer.host]?.remove(destination)
-    if peersByHost[peer.host]?.isEmpty == true { peersByHost[peer.host] = nil }
+    peers[host]?[destination] = nil
+    if peers[host]?.isEmpty == true { peers[host] = nil }
   }
 
   private func emitterSubscription(_ oNo: OcaONo) -> OcaSubscriptionManagerSubscription {
@@ -588,10 +595,10 @@ public actor OSCOCABridge {
 
   /// Any datagram from a host renews its peers' subscriptions.
   private func renew(host: String) {
-    guard let destinations = peersByHost[host] else { return }
+    guard let destinations = peers[host]?.keys else { return }
     let now = ContinuousClock.now
     for destination in destinations {
-      peers[destination]?.lastSeen = now
+      peers[host]?[destination]?.lastSeen = now
     }
   }
 
@@ -608,9 +615,12 @@ public actor OSCOCABridge {
 
   private func sweep(lifetime: Duration) async {
     let now = ContinuousClock.now
-    let expired = peers.filter { !$0.value.isStatic && now - $0.value.lastSeen > lifetime }
-    for destination in expired.keys {
-      await removePeer(destination)
+    let expired = peers.flatMap { host, destinations in
+      destinations.filter { !$0.value.isStatic && now - $0.value.lastSeen > lifetime }
+        .map { (host: host, destination: $0.key) }
+    }
+    for (host, destination) in expired {
+      await removePeer(destination, on: host)
     }
   }
 
@@ -704,43 +714,43 @@ public enum OSCOCACustomBridgeableError: Error {
 /// An object that converts between its OCA values and OSC arguments itself. Each method
 /// throws `methodNotBridged` or `propertyNotBridged` for what it leaves to the bridge.
 public protocol OSCOCACustomBridgeable: SwiftOCADevice.OcaRoot {
-  /// The parameters of a method invoked by `message`.
-  func bridgeValues(
-    from message: OSCMessage,
-    for methodID: OcaMethodID
+  /// The OCA parameters of a method, from the OSC arguments invoking it.
+  func ocaParameters(
+    for methodID: OcaMethodID,
+    from message: OSCMessage
   ) throws -> [any Encodable & Sendable]
 
-  /// The value a property is set to by `message`.
-  func bridgeValue(
-    from message: OSCMessage,
-    for propertyID: OcaPropertyID
+  /// The OCA value a property is set to, from the OSC arguments setting it.
+  func ocaValue(
+    for propertyID: OcaPropertyID,
+    from message: OSCMessage
   ) throws -> any Encodable & Sendable
 
-  /// The OSC arguments for a property's value.
-  func bridgeOSCValues(
-    from value: any Sendable,
-    for propertyID: OcaPropertyID
+  /// The OSC arguments for a property's OCA value.
+  func oscValues(
+    for propertyID: OcaPropertyID,
+    from value: any Sendable
   ) throws -> OSCValues
 }
 
 public extension OSCOCACustomBridgeable {
-  func bridgeValues(
-    from message: OSCMessage,
-    for methodID: OcaMethodID
+  func ocaParameters(
+    for methodID: OcaMethodID,
+    from message: OSCMessage
   ) throws -> [any Encodable & Sendable] {
     throw OSCOCACustomBridgeableError.methodNotBridged
   }
 
-  func bridgeValue(
-    from message: OSCMessage,
-    for propertyID: OcaPropertyID
+  func ocaValue(
+    for propertyID: OcaPropertyID,
+    from message: OSCMessage
   ) throws -> any Encodable & Sendable {
     throw OSCOCACustomBridgeableError.propertyNotBridged
   }
 
-  func bridgeOSCValues(
-    from value: any Sendable,
-    for propertyID: OcaPropertyID
+  func oscValues(
+    for propertyID: OcaPropertyID,
+    from value: any Sendable
   ) throws -> OSCValues {
     throw OSCOCACustomBridgeableError.propertyNotBridged
   }
@@ -761,9 +771,9 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
     }
   }
 
-  public func bridgeValues(
-    from message: OSCMessage,
-    for methodID: OcaMethodID
+  public func ocaParameters(
+    for methodID: OcaMethodID,
+    from message: OSCMessage
   ) throws -> [any Encodable & Sendable] {
     guard methodID == Self.setStateMethodID else {
       throw OSCOCACustomBridgeableError.methodNotBridged
@@ -771,9 +781,9 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
     return try [muteState(from: message)]
   }
 
-  public func bridgeValue(
-    from message: OSCMessage,
-    for propertyID: OcaPropertyID
+  public func ocaValue(
+    for propertyID: OcaPropertyID,
+    from message: OSCMessage
   ) throws -> any Encodable & Sendable {
     guard propertyID == Self.statePropertyID else {
       throw OSCOCACustomBridgeableError.propertyNotBridged
@@ -781,9 +791,9 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
     return try muteState(from: message)
   }
 
-  public func bridgeOSCValues(
-    from value: any Sendable,
-    for propertyID: OcaPropertyID
+  public func oscValues(
+    for propertyID: OcaPropertyID,
+    from value: any Sendable
   ) throws -> OSCValues {
     guard propertyID == Self.statePropertyID, let state = value as? OcaMuteState else {
       throw OSCOCACustomBridgeableError.propertyNotBridged
