@@ -19,6 +19,7 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
+import OrderedCollections
 import SwiftOSCCore
 @_spi(SwiftOCAPrivate)
 import SwiftOCA
@@ -47,18 +48,12 @@ public final class OSCOCABridge {
   let address: any SocketAddress
   let subscriptionLifetime: Duration?
   var task: Task<(), Never>?
-  /// Which run of the event loop is current, so that one that has ended can tell whether
-  /// the sender it set is still the bridge's.
-  private var eventLoopGeneration = 0
 
   /// Sends a datagram from the bridge's socket, once the event loop has bound it.
   typealias Sender = @Sendable (Data, AnySocketAddress) async throws -> ()
 
-  /// The sender, where the drain reads it without the device's executor.
-  private var senderSlot = OSCOCASenderSlot()
   /// Messages waiting for the socket; nil while the bridge is stopped.
   private var outbound: OSCOCAOutboundQueue?
-  private var outboundTask: Task<(), Never>?
   /// Removes peers not heard from within `subscriptionLifetime`; none without one.
   private var leaseExpiryTask: Task<(), Never>?
 
@@ -149,22 +144,12 @@ public final class OSCOCABridge {
 
   public func run() {
     task?.cancel()
-    senderSlot.set(nil)
-    eventLoopGeneration += 1
-    let generation = eventLoopGeneration
     startOutbound()
     startExpiringLeases()
     let address = address
     task = Task {
       try? await udpEventLoop(address: address, with: self)
-      eventLoopEnded(generation)
     }
-  }
-
-  /// The socket an event loop sent from has gone with it.
-  private func eventLoopEnded(_ generation: Int) {
-    guard generation == eventLoopGeneration else { return }
-    senderSlot.set(nil)
   }
 
   /// Stops the bridge. Its peers' subscriptions are removed; destinations added with
@@ -179,13 +164,9 @@ public final class OSCOCABridge {
         removePeer(destination, on: host)
       }
     }
+    // a message waiting for the socket is dropped with the queue
     outbound?.close()
     outbound = nil
-    outboundTask?.cancel()
-    outboundTask = nil
-    // an outbound message waiting for the socket is dropped with it
-    senderSlot.close()
-    senderSlot = OSCOCASenderSlot()
   }
 
   /// Sends the changes of every property matching `patterns`, or of every property if there
@@ -265,9 +246,12 @@ public final class OSCOCABridge {
     try await _handle(message: message, from: AnySocketAddress(source))
   }
 
-  func _set(sender: @escaping @Sendable (Data, sockaddr_storage) async throws -> ()) {
+  @discardableResult
+  func _startDraining(
+    with sender: @escaping @Sendable (Data, sockaddr_storage) async throws -> ()
+  ) -> Task<(), Never> {
     let sender: Sender = { data, destination in try await sender(data, destination.asStorage()) }
-    _set(sender: sender)
+    return _startDraining(with: sender)
   }
   #endif
 
@@ -698,27 +682,29 @@ public final class OSCOCABridge {
 
   // MARK: - outbound
 
-  /// Starts draining outbound messages, if that is not under way. A message queued before
-  /// the socket is bound waits for it. A stopped bridge drains nothing, and sends nothing.
+  /// Starts queueing outbound messages, if that is not under way. A message queued before
+  /// the socket is bound waits for it. A stopped bridge queues nothing, and sends nothing.
   func startOutbound() {
     guard outbound == nil else { return }
-    let outbound = OSCOCAOutboundQueue()
-    self.outbound = outbound
-    // detached, so as not to drain on the device's executor and wait behind the work
-    // that is raising what it drains
-    let senderSlot = senderSlot
-    outboundTask = Task.detached {
-      // the socket first, so that what waits for it is merged in the queue meanwhile; and
-      // again after the message, as the socket may have changed while waiting for it
-      while await senderSlot.sender() != nil, let (data, destination) = await outbound.next() {
-        guard let sender = await senderSlot.sender() else { break }
-        try? await sender(data, destination)
-      }
-    }
+    outbound = OSCOCAOutboundQueue()
   }
 
-  func _set(sender: @escaping Sender) {
-    senderSlot.set(sender)
+  /// Sends the queued messages with `sender`, until the task is cancelled or the bridge
+  /// stops. The event loop starts this once it has bound its socket, and cancels it when the
+  /// socket goes; a newer drain takes over from an older one.
+  @discardableResult
+  func _startDraining(with sender: @escaping Sender) -> Task<(), Never> {
+    startOutbound()
+    let outbound = outbound!
+    // detached, so as not to drain on the device's executor and wait behind the work
+    // that is raising what it drains
+    return Task.detached {
+      for await _ in outbound.wakeups() {
+        while !Task.isCancelled, let (data, destination) = outbound.popFirst() {
+          try? await sender(data, destination)
+        }
+      }
+    }
   }
 
   /// Queues a message for a peer; the device never waits on the socket. A value still
@@ -890,58 +876,6 @@ extension OSCOCABridge: OcaController {
   }
 }
 
-/// The socket's sender, which the outbound drain waits for and reads without being on the
-/// device's executor.
-final class OSCOCASenderSlot: Sendable {
-  private struct State {
-    var sender: OSCOCABridge.Sender?
-    var waiters = [CheckedContinuation<OSCOCABridge.Sender?, Never>]()
-    var isClosed = false
-  }
-
-  private let state = Mutex(State())
-
-  /// Sets the sender, or clears it while the socket is gone; a waiter is given a new one.
-  func set(_ sender: OSCOCABridge.Sender?) {
-    let waiters = state.withLock { state in
-      state.sender = sender
-      guard sender != nil else { return [CheckedContinuation<OSCOCABridge.Sender?, Never>]() }
-      defer { state.waiters.removeAll() }
-      return state.waiters
-    }
-    for waiter in waiters {
-      waiter.resume(returning: sender)
-    }
-  }
-
-  /// Ends waiting for good: the bridge has stopped.
-  func close() {
-    let waiters = state.withLock { state in
-      state.isClosed = true
-      state.sender = nil
-      defer { state.waiters.removeAll() }
-      return state.waiters
-    }
-    for waiter in waiters {
-      waiter.resume(returning: nil)
-    }
-  }
-
-  /// The sender, once there is one; nil once the slot is closed.
-  func sender() async -> OSCOCABridge.Sender? {
-    if let sender = state.withLock({ $0.sender }) { return sender }
-    return await withCheckedContinuation { continuation in
-      let ready: OSCOCABridge.Sender?? = state.withLock { state in
-        if let sender = state.sender { return .some(sender) }
-        if state.isClosed { return .some(nil) }
-        state.waiters.append(continuation)
-        return nil
-      }
-      if let ready { continuation.resume(returning: ready) }
-    }
-  }
-}
-
 /// Messages for peers, in the order they were queued, where a newer value for an address
 /// and peer replaces the one queued, keeping its place. Its size is bounded: past
 /// `capacity`, the oldest message is dropped.
@@ -956,85 +890,58 @@ final class OSCOCAOutboundQueue: Sendable {
   }
 
   private struct State {
-    var order = [Key]()
-    var head = 0
-    var messages = [Key: Data]()
+    var messages = OrderedDictionary<Key, Data>()
     var serial = 0
-    var waiter: CheckedContinuation<(Data, AnySocketAddress)?, Never>?
-    var isClosed = false
-
-    var count: Int { order.count - head }
-
-    mutating func popFirst() -> (Data, AnySocketAddress)? {
-      while head < order.count {
-        let key = order[head]
-        head += 1
-        // keep the array from growing without end as the head moves on
-        if head > 1024, head * 2 > order.count {
-          order.removeFirst(head)
-          head = 0
-        }
-        if let data = messages.removeValue(forKey: key) {
-          return (data, key.destination)
-        }
-      }
-      return nil
-    }
+    var wakeup: AsyncStream<()>.Continuation?
   }
 
   private let state = Mutex(State())
 
   func push(_ data: Data, to destination: AnySocketAddress, replacing address: String?) {
-    let waiter: CheckedContinuation<(Data, AnySocketAddress)?, Never>? = state.withLock { state in
-      guard !state.isClosed else { return nil }
+    let wakeup = state.withLock { state in
       let key: Key
       if let address {
         key = Key(destination: destination, address: address, serial: 0)
-        if state.messages[key] != nil {
-          state.messages[key] = data
-          return nil
-        }
       } else {
         state.serial += 1
         key = Key(destination: destination, address: nil, serial: state.serial)
       }
-      if let waiter = state.waiter {
-        state.waiter = nil
-        return waiter
-      }
-      state.order.append(key)
       state.messages[key] = data
-      if state.count > Self.capacity {
-        _ = state.popFirst()
+      if state.messages.count > Self.capacity {
+        state.messages.removeFirst()
       }
-      return nil
+      return state.wakeup
     }
-    waiter?.resume(returning: (data, destination))
+    wakeup?.yield()
   }
 
-  /// The next message, once there is one; nil once the queue is closed.
-  func next() async -> (Data, AnySocketAddress)? {
-    await withCheckedContinuation { continuation in
-      let ready: (Data, AnySocketAddress)?? = state.withLock { state in
-        if let message = state.popFirst() { return .some(message) }
-        if state.isClosed { return .some(nil) }
-        state.waiter = continuation
-        return nil
-      }
-      if let ready { continuation.resume(returning: ready) }
+  func popFirst() -> (Data, AnySocketAddress)? {
+    state.withLock { state in
+      guard !state.messages.isEmpty else { return nil }
+      let (key, data) = state.messages.removeFirst()
+      return (data, key.destination)
     }
   }
 
-  /// Drops what is queued and ends waiting for good: the bridge has stopped.
+  /// Yields when there may be messages, starting now, for the one drain; a newer call ends
+  /// the stream of an older one, as does closing the queue.
+  func wakeups() -> AsyncStream<()> {
+    let (stream, wakeup) = AsyncStream<()>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    wakeup.yield()
+    state.withLock { state in
+      state.wakeup?.finish()
+      state.wakeup = wakeup
+    }
+    return stream
+  }
+
+  /// Drops what is queued and ends the drain's wakeups: the bridge has stopped.
   func close() {
-    let waiter = state.withLock { state in
-      state.isClosed = true
-      state.order.removeAll()
-      state.head = 0
+    let wakeup = state.withLock { state in
       state.messages.removeAll()
-      defer { state.waiter = nil }
-      return state.waiter
+      defer { state.wakeup = nil }
+      return state.wakeup
     }
-    waiter?.resume(returning: nil)
+    wakeup?.finish()
   }
 }

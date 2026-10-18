@@ -218,8 +218,9 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     let outbox = Outbox()
     self.outbox = outbox
     bridge = OSCOCABridge(address: client)
-    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
-    await bridge.startOutbound()
+    await bridge._startDraining(with: { data, destination in
+      await outbox.append(data, to: destination)
+    })
   }
 
   override func tearDown() async throws {
@@ -424,7 +425,9 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     XCTAssertTrue(messages.isEmpty)
 
     // the socket arrives, as it does when the bridge runs; the initial value was waiting
-    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+    await bridge._startDraining(with: { data, destination in
+      await outbox.append(data, to: destination)
+    })
     messages = await outbox.messages(count: 1)
     XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9300"])
     XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/Block/Gain/gain"])
@@ -509,8 +512,9 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     await outbox.removeAll()
     // as run() would: drain again, with a new socket
     let outbox = outbox!
-    await bridge.startOutbound()
-    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+    await bridge._startDraining(with: { data, destination in
+      await outbox.append(data, to: destination)
+    })
 
     try await send(OSCMessage("/Block/Mute/state", values: [true]))
     let messages = await outbox.messages(count: 1)
@@ -545,7 +549,9 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     try await bridge._handle(message: OSCMessage("/nothing/here").rawData(), from: peer)
     try await bridge._handle(message: OSCMessage("/nothing/there").rawData(), from: peer)
 
-    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+    await bridge._startDraining(with: { data, destination in
+      await outbox.append(data, to: destination)
+    })
     let messages = await outbox.messages(count: 4)
     let late = await outbox.messages(count: 5, timeout: .milliseconds(200))
     // the gain's values became one, which went out with the latest value; the two errors,

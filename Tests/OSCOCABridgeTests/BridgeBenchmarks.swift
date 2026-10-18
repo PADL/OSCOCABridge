@@ -121,8 +121,7 @@ final class BridgeBenchmarks: XCTestCase {
     let sent = Counter()
     let bridge = OSCOCABridge(address: Self.client)
     let sender: OSCOCABridge.Sender = { _, _ in sent.increment() }
-    await bridge._set(sender: sender)
-    await bridge.startOutbound()
+    await bridge._startDraining(with: sender)
     return (bridge, sent)
   }
 

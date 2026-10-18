@@ -21,6 +21,7 @@ let package = Package(
     .package(url: "https://github.com/PADL/IORingSwift", from: "2.1.3"),
     .package(url: "https://github.com/orchetect/swift-osc-core", branch: "main"),
     .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
+    .package(url: "https://github.com/apple/swift-collections", from: "1.1.0"),
     .package(url: "https://github.com/apple/swift-system", from: "1.2.1"),
     .package(url: "https://github.com/sideeffect-io/AsyncExtensions", from: "0.7.0"),
     .package(url: "https://github.com/swhitty/FlyingFox", from: "0.20.0"),
@@ -40,6 +41,7 @@ let package = Package(
           condition: .when(platforms: [.macOS, .iOS, .android])
         ),
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
+        .product(name: "OrderedCollections", package: "swift-collections"),
         .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
