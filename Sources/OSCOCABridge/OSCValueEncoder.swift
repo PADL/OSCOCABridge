@@ -24,8 +24,8 @@ import SwiftOSCCore
 /// Flattens a value into OSC arguments by encoding it: each scalar it encodes becomes an
 /// argument, in order, so a record gives its fields, a collection its elements and an
 /// enumeration its raw value. Integers that are not OSC types are sent as `Int32`, or as
-/// `Int64` if they do not fit. A value with nothing OSC can carry, such as a nil, is
-/// refused with `unsupported`.
+/// `Int64` if they do not fit. A value with nothing OSC can carry, such as a nil or an
+/// integer beyond `Int64`, is refused with `Unsupported`.
 struct OSCValueEncoder {
   struct Unsupported: Error {}
 
@@ -57,11 +57,13 @@ private final class _OSCValueEncoder: Encoder {
     values.append(value)
   }
 
-  func appendInteger(_ value: some FixedWidthInteger) {
+  func appendInteger(_ value: some FixedWidthInteger) throws {
     if let value = Int32(exactly: value) {
       values.append(value)
+    } else if let value = Int64(exactly: value) {
+      values.append(value)
     } else {
-      values.append(Int64(clamping: value))
+      throw OSCValueEncoder.Unsupported()
     }
   }
 
@@ -84,16 +86,16 @@ private struct SingleValueContainer: SingleValueEncodingContainer {
   func encode(_ value: String) { encoder.append(value) }
   func encode(_ value: Double) { encoder.append(value) }
   func encode(_ value: Float) { encoder.append(value) }
-  func encode(_ value: Int) { encoder.appendInteger(value) }
-  func encode(_ value: Int8) { encoder.appendInteger(value) }
-  func encode(_ value: Int16) { encoder.appendInteger(value) }
+  func encode(_ value: Int) throws { try encoder.appendInteger(value) }
+  func encode(_ value: Int8) throws { try encoder.appendInteger(value) }
+  func encode(_ value: Int16) throws { try encoder.appendInteger(value) }
   func encode(_ value: Int32) { encoder.append(value) }
   func encode(_ value: Int64) { encoder.append(value) }
-  func encode(_ value: UInt) { encoder.appendInteger(value) }
-  func encode(_ value: UInt8) { encoder.appendInteger(value) }
-  func encode(_ value: UInt16) { encoder.appendInteger(value) }
-  func encode(_ value: UInt32) { encoder.appendInteger(value) }
-  func encode(_ value: UInt64) { encoder.appendInteger(value) }
+  func encode(_ value: UInt) throws { try encoder.appendInteger(value) }
+  func encode(_ value: UInt8) throws { try encoder.appendInteger(value) }
+  func encode(_ value: UInt16) throws { try encoder.appendInteger(value) }
+  func encode(_ value: UInt32) throws { try encoder.appendInteger(value) }
+  func encode(_ value: UInt64) throws { try encoder.appendInteger(value) }
   func encode(_ value: some Encodable) throws { try encoder.encode(value) }
 }
 

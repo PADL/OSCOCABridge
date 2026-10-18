@@ -35,7 +35,7 @@ import XCTest
 
 /// Run with `OSCOCA_BENCH=<objects> swift test -c release -Xswiftc -enable-testing --filter
 /// BridgeBenchmarks`, where `<objects>` is the size of the block of gains the device is given
-/// (10 by default). They build their own objects on the shared device, so are run alone.
+/// (10 by default). They add a block of their own to the shared device.
 final class BridgeBenchmarks: XCTestCase {
   /// The device has one block of this many gains, so that each run measures one size.
   private static let treeSize = Int(ProcessInfo.processInfo.environment["OSCOCA_BENCH"] ?? "") ?? 10
@@ -45,7 +45,7 @@ final class BridgeBenchmarks: XCTestCase {
   /// The objects, made once: a block of each tree size, each of that many gains.
   private static let objects = Task { @OcaDevice in
     let device = OcaDevice.shared
-    try await device.initializeDefaultObjects()
+    try await SharedDevice.initialized.value
     for size in treeSizes {
       let block = try await SwiftOCADevice.OcaBlock<SwiftOCADevice.OcaWorker>(
         role: "Bench\(size)",

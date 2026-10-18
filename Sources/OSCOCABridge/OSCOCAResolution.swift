@@ -115,3 +115,8 @@ func oscObjects(
 func oscAddress(rolePath: OcaNamePath, leaf: String) -> String {
   "/" + (rolePath + [leaf]).joined(separator: "/")
 }
+
+extension OcaDevicePropertyDescriptor {
+  /// The IDs a change to the property is raised under: its own, and its y's for a vector.
+  var oscPropertyIDs: [OcaPropertyID] { [propertyID, yPropertyID].compactMap { $0 } }
+}

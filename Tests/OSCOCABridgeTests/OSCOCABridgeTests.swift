@@ -94,6 +94,8 @@ final class OSCValueBridgeTests: XCTestCase {
     XCTAssertEqual(try OSCValueBridge.oscValues(from: true) as? [Bool], [true])
     XCTAssertEqual(try OSCValueBridge.oscValues(from: UInt8(7)) as? [Int32], [7])
     XCTAssertEqual(try OSCValueBridge.oscValues(from: UInt32.max) as? [Int64], [Int64(UInt32.max)])
+    // beyond Int64, so as a blob rather than clamped
+    XCTAssertTrue(try OSCValueBridge.oscValues(from: UInt64.max).first is Data)
     XCTAssertEqual(try OSCValueBridge.oscValues(from: OcaMuteState.unmuted) as? [Int32], [2])
     XCTAssertEqual(try OSCValueBridge.oscValues(from: "label") as? [String], ["label"])
     XCTAssertEqual(
@@ -171,11 +173,19 @@ private final class XYActuator: SwiftOCADevice.OcaActuator {
   var position = OcaVector2D<OcaInt32>(x: 0, y: 0)
 }
 
+/// The shared device, initialised once for every test class: initialising it again would
+/// replace its root block, and the objects of the class that initialised it first with it.
+enum SharedDevice {
+  static let initialized = Task { @OcaDevice in
+    try await OcaDevice.shared.initializeDefaultObjects()
+  }
+}
+
 /// The device's objects, made once: the shared device is the only one there is.
 private enum TestDevice {
   static let objects = Task { @OcaDevice in
     let device = OcaDevice.shared
-    try await device.initializeDefaultObjects()
+    try await SharedDevice.initialized.value
     let block = try await SwiftOCADevice.OcaBlock<SwiftOCADevice.OcaWorker>(
       role: "Block",
       deviceDelegate: device
@@ -298,9 +308,17 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     try await send(OSCMessage("/Block/Mute/state"))
     try await send(OSCMessage("/Block/Mute/state", values: [true]))
     try await send(OSCMessage("/Block/Mute/state"))
+    // as any Boolean: what the bridge accepts for one, it accepts for a mute
+    try await send(OSCMessage("/Block/Mute/state", values: [Double(0)]))
+    try await send(OSCMessage("/Block/Mute/state"))
+    try await send(OSCMessage("/Block/Mute/state", values: [Int64(1)]))
+    try await send(OSCMessage("/Block/Mute/state"))
 
-    let messages = await outbox.messages(count: 2)
-    XCTAssertEqual(messages.map { $0.message.values as? [Bool] }, [[false], [true]])
+    let messages = await outbox.messages(count: 4)
+    XCTAssertEqual(
+      messages.map { $0.message.values as? [Bool] },
+      [[false], [true], [false], [true]]
+    )
   }
 
   func testErrors() async throws {
@@ -471,6 +489,72 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     try await send(OSCMessage("/Block/Mute/state", values: [false]))
     let after = await outbox.messages(count: 1, timeout: .milliseconds(200))
     XCTAssertTrue(after.isEmpty)
+  }
+
+  func testWildcardMatchesEitherIDOfAVectorProperty() async throws {
+    try await send(OSCMessage("/subscribe", values: ["/Block/*/5p2", Int32(9001)]))
+    let messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/Block/XY/5p2"])
+    try await send(OSCMessage("/unsubscribe", values: [Int32(9001)]))
+  }
+
+  func testDestinationAndItsOwnSubscriptionsAreSeparate() async throws {
+    // the destination is also a client, which subscribes to the gain itself
+    let destination = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:9001"
+    )
+    try await send(OSCMessage("/Block/Mute/state", values: [false]))
+    try await bridge.addDestination(destination, patterns: ["/Block/Mute/state"])
+    try await send(OSCMessage("/subscribe", values: ["/Block/Gain/gain", Int32(9001)]))
+    _ = await outbox.messages(count: 2)
+    await outbox.removeAll()
+
+    // its own goes with its /unsubscribe; the destination's does not
+    try await send(OSCMessage("/unsubscribe", values: [Int32(9001)]))
+    try await send(OSCMessage("/Block/Gain/gain", values: [Float(-41)]), from: otherClient)
+    try await send(OSCMessage("/Block/Mute/state", values: [true]), from: otherClient)
+    var messages = await outbox.messages(count: 2, timeout: .milliseconds(300))
+    XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/Block/Mute/state"])
+    await outbox.removeAll()
+
+    // and the destination's goes with removeDestination, leaving what it subscribed to
+    try await send(OSCMessage("/subscribe", values: ["/Block/Gain/gain", Int32(9001)]))
+    _ = await outbox.messages(count: 1)
+    await outbox.removeAll()
+    await bridge.removeDestination(destination)
+    try await send(OSCMessage("/Block/Mute/state", values: [false]), from: otherClient)
+    try await send(OSCMessage("/Block/Gain/gain", values: [Float(-42)]), from: otherClient)
+    messages = await outbox.messages(count: 2, timeout: .milliseconds(300))
+    XCTAssertEqual(messages.map(\.message.addressPattern.stringValue), ["/Block/Gain/gain"])
+    try await send(OSCMessage("/unsubscribe", values: [Int32(9001)]))
+  }
+
+  func testSocketIsClosedWithTheEventLoop() async throws {
+    // the address is bound again once the first loop is cancelled
+    let address = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:18765"
+    )
+    let bridge = OSCOCABridge(address: address)
+    await bridge.startOutbound()
+    for _ in 0..<2 {
+      // nil once cancelled by the test; the error if it ended by itself, as a bind failure
+      let loop = Task { () -> (any Error)? in
+        do {
+          try await udpEventLoop(address: address, with: bridge)
+        } catch {
+          return Task.isCancelled ? nil : error
+        }
+        return nil
+      }
+      try await Task.sleep(for: .milliseconds(300))
+      loop.cancel()
+      if let error = await loop.value {
+        XCTFail("the loop ended with \(error)")
+      }
+    }
+    await bridge.stop()
   }
 
   func testSubscribingToNothingIsAnError() async throws {

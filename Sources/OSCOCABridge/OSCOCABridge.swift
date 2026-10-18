@@ -47,7 +47,8 @@ let MaxMessageSize = 1500
 public final class OSCOCABridge {
   let address: any SocketAddress
   let subscriptionLifetime: Duration?
-  var task: Task<(), Never>?
+  /// The event loop, which fails if the socket cannot be bound.
+  var task: Task<(), Error>?
 
   /// Sends a datagram from the bridge's socket, once the event loop has bound it.
   typealias Sender = @Sendable (Data, AnySocketAddress) async throws -> ()
@@ -66,9 +67,10 @@ public final class OSCOCABridge {
 
   struct Peer {
     var subscriptions = [Subscription: OcaDevicePropertyDescriptor]()
+    /// Those added with `addDestination(_:patterns:)`, which only `removeDestination(_:)`
+    /// removes.
+    var staticSubscriptions = Set<Subscription>()
     var lastSeen = ContinuousClock.now
-    /// Added with `addDestination(_:patterns:)`; never expires.
-    var isStatic = false
   }
 
   /// A property of an object, which a change event names.
@@ -148,7 +150,7 @@ public final class OSCOCABridge {
     let address = address
     task = Task {
       await startOutbound()
-      try? await udpEventLoop(address: address, with: self)
+      try await udpEventLoop(address: address, with: self)
     }
   }
 
@@ -161,8 +163,8 @@ public final class OSCOCABridge {
     leaseExpiryTask?.cancel()
     leaseExpiryTask = nil
     for (host, destinations) in peers {
-      for (destination, peer) in destinations where !peer.isStatic {
-        removePeer(destination, on: host)
+      for destination in destinations.keys {
+        removeSubscriptions(of: destination, on: host, static: false)
       }
     }
     // a message waiting for the socket is dropped with the queue
@@ -180,10 +182,12 @@ public final class OSCOCABridge {
     try await subscribe(AnySocketAddress(destination), to: patterns, isStatic: true)
   }
 
+  /// Removes what `addDestination(_:patterns:)` added for `destination`; what it subscribed
+  /// to itself stays.
   public func removeDestination(_ destination: any SocketAddress) {
     let destination = AnySocketAddress(destination)
     guard let host = try? host(of: destination) else { return }
-    removePeer(destination, on: host)
+    removeSubscriptions(of: destination, on: host, static: true)
   }
 
   // MARK: - inbound
@@ -496,15 +500,15 @@ public final class OSCOCABridge {
       for (rolePath, object) in objects {
         for descriptor in object.oscVisibleProperties where descriptor.getMethodID != nil {
           let byName = oscAddress(rolePath: rolePath, leaf: descriptor.name)
-          let byID = oscAddress(rolePath: rolePath, leaf: descriptor.propertyID.oscLeaf)
+          let byIDs = descriptor.oscPropertyIDs.map {
+            oscAddress(rolePath: rolePath, leaf: $0.oscLeaf)
+          }
           let address: String? = if patterns.isEmpty {
             byName
           } else if wildcards.contains(where: { $0.matches(localAddress: byName) }) {
             byName
-          } else if wildcards.contains(where: { $0.matches(localAddress: byID) }) {
-            byID
           } else {
-            nil
+            byIDs.first { byID in wildcards.contains { $0.matches(localAddress: byID) } }
           }
           guard let address else { continue }
           resolved[Subscription(
@@ -546,11 +550,11 @@ public final class OSCOCABridge {
     }
 
     peer.lastSeen = .now
-    peer.isStatic = peer.isStatic || isStatic
+    if isStatic { peer.staticSubscriptions.formUnion(resolved.keys) }
     for (subscription, (_, descriptor)) in added {
       peer.subscriptions[subscription] = descriptor
       let recipient = Recipient(destination: destination, subscription: subscription)
-      for propertyID in [descriptor.propertyID, descriptor.yPropertyID].compactMap({ $0 }) {
+      for propertyID in descriptor.oscPropertyIDs {
         recipients[
           PropertyKey(oNo: subscription.oNo, propertyID: propertyID),
           default: PropertyRecipients(descriptor: descriptor)
@@ -567,28 +571,41 @@ public final class OSCOCABridge {
     }
   }
 
-  /// A destination added with `addDestination(_:patterns:)` is only removed by
+  /// A subscription added with `addDestination(_:patterns:)` is only removed by
   /// `removeDestination(_:)`, not by a peer's `/unsubscribe`.
   private func unsubscribe(
     _ destination: AnySocketAddress,
     on host: AnySocketAddress,
     from patterns: [String]
   ) {
-    guard let peer = peers[host]?[destination], !peer.isStatic else { return }
+    guard let peer = peers[host]?[destination] else { return }
     guard !patterns.isEmpty else {
-      removePeer(destination, on: host)
+      removeSubscriptions(of: destination, on: host, static: false)
       return
     }
 
     let patterns = patterns.map { OSCAddressPattern($0) }
     let removed = peer.subscriptions.keys.filter { subscription in
-      patterns.contains { $0.matches(localAddress: subscription.address) }
+      !peer.staticSubscriptions.contains(subscription)
+        && patterns.contains { $0.matches(localAddress: subscription.address) }
     }
     for subscription in removed {
       remove(subscription, of: destination, on: host)
     }
-    if peers[host]?[destination]?.subscriptions.isEmpty == true {
-      removePeer(destination, on: host)
+  }
+
+  /// Removes a peer's subscriptions: those added with `addDestination(_:patterns:)`, or the
+  /// others.
+  private func removeSubscriptions(
+    of destination: AnySocketAddress,
+    on host: AnySocketAddress,
+    static isStatic: Bool
+  ) {
+    guard let peer = peers[host]?[destination] else { return }
+    for subscription in peer.subscriptions.keys
+      where peer.staticSubscriptions.contains(subscription) == isStatic
+    {
+      remove(subscription, of: destination, on: host)
     }
   }
 
@@ -600,22 +617,19 @@ public final class OSCOCABridge {
     guard let descriptor = peers[host]?[destination]?.subscriptions
       .removeValue(forKey: subscription)
     else { return }
+    peers[host]?[destination]?.staticSubscriptions.remove(subscription)
     let recipient = Recipient(destination: destination, subscription: subscription)
-    for propertyID in [descriptor.propertyID, descriptor.yPropertyID].compactMap({ $0 }) {
+    for propertyID in descriptor.oscPropertyIDs {
       let key = PropertyKey(oNo: subscription.oNo, propertyID: propertyID)
       recipients[key]?.recipients.remove(recipient)
       if recipients[key]?.recipients.isEmpty == true { recipients[key] = nil }
     }
     releaseEmitter(subscription.oNo)
-  }
-
-  private func removePeer(_ destination: AnySocketAddress, on host: AnySocketAddress) {
-    guard let peer = peers[host]?[destination] else { return }
-    for subscription in peer.subscriptions.keys {
-      remove(subscription, of: destination, on: host)
+    // the peer goes with its last subscription
+    if peers[host]?[destination]?.subscriptions.isEmpty == true {
+      peers[host]?[destination] = nil
+      if peers[host]?.isEmpty == true { peers[host] = nil }
     }
-    peers[host]?[destination] = nil
-    if peers[host]?.isEmpty == true { peers[host] = nil }
   }
 
   private func emitterSubscription(_ oNo: OcaONo) -> OcaSubscriptionManagerSubscription {
@@ -668,15 +682,16 @@ public final class OSCOCABridge {
     }
   }
 
-  /// Removes the peers not heard from within `lifetime`, other than fixed destinations.
+  /// Removes the subscriptions of the peers not heard from within `lifetime`, other than
+  /// those added with `addDestination(_:patterns:)`.
   private func expireLeases(olderThan lifetime: Duration) {
     let now = ContinuousClock.now
     let expired = peers.flatMap { host, destinations in
-      destinations.filter { !$0.value.isStatic && now - $0.value.lastSeen > lifetime }
+      destinations.filter { now - $0.value.lastSeen > lifetime }
         .map { (host: host, destination: $0.key) }
     }
     for (host, destination) in expired {
-      removePeer(destination, on: host)
+      removeSubscriptions(of: destination, on: host, static: false)
     }
   }
 
@@ -689,13 +704,13 @@ public final class OSCOCABridge {
     guard outbound == nil else { return }
     outbound = OSCOCAOutboundQueue()
     for destinations in peers.values {
-      for (destination, peer) in destinations where peer.isStatic {
-        for (subscription, descriptor) in peer.subscriptions {
-          if let object = object(subscription.oNo),
-             let values = try? await get(descriptor, of: object)
-          {
-            send(OSCMessage(subscription.address, values: values), to: destination)
-          }
+      for (destination, peer) in destinations {
+        for subscription in peer.staticSubscriptions {
+          guard let descriptor = peer.subscriptions[subscription],
+                let object = object(subscription.oNo),
+                let values = try? await get(descriptor, of: object)
+          else { continue }
+          send(OSCMessage(subscription.address, values: values), to: destination)
         }
       }
     }
@@ -739,13 +754,10 @@ public final class OSCOCABridge {
   private func handle(_ notification: Ocp1Notification2) async {
     guard notification.event.eventID == OcaPropertyChangedEventID,
           case let .ocp1(data) = notification.eventData,
-          let propertyID = try? OcaEventDataCoding.propertyID(from: data, format: .ocp1),
-          let property = recipients[PropertyKey(
-            oNo: notification.event.emitterONo,
-            propertyID: propertyID
-          )]
+          let propertyID = try? OcaEventDataCoding.propertyID(from: data, format: .ocp1)
     else { return }
     let key = PropertyKey(oNo: notification.event.emitterONo, propertyID: propertyID)
+    guard let property = recipients[key] else { return }
     let descriptor = property.descriptor
 
     let values: OSCValues
@@ -835,12 +847,7 @@ extension SwiftOCADevice.OcaMute: OSCOCACustomBridgeable {
 
   private func muteState(from message: OSCMessage) throws -> OcaMuteState {
     guard message.values.count == 1 else { throw Ocp1Error.status(.badFormat) }
-    switch message.values[0] {
-    case let value as Bool: return value ? .muted : .unmuted
-    case let value as Int32: return value != 0 ? .muted : .unmuted
-    case let value as Float: return value != 0 ? .muted : .unmuted
-    default: throw Ocp1Error.status(.badFormat)
-    }
+    return try OSCValueBridge.value(Bool.self, from: message.values) ? .muted : .unmuted
   }
 
   public func ocaParameters(

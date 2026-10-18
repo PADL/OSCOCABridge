@@ -57,10 +57,18 @@ private func _makeUdpSocket(address: SocketAddress) async throws -> Socket {
 func udpEventLoop(address: sockaddr_storage, with bridge: OSCOCABridge) async throws {
   let socket = try await _makeUdpSocket(address: address)
   let pool = _defaultPool()
-  try await pool.prepare()
-
+  let asyncSocket: AsyncSocket
+  do {
+    try await pool.prepare()
+    asyncSocket = try AsyncSocket(socket: socket, pool: pool)
+  } catch {
+    try? socket.close()
+    throw error
+  }
+  // closed however the loop ends, so that the address can be bound again
+  defer { try? asyncSocket.close() }
   let poolTask = Task { try await pool.run() }
-  let asyncSocket = try AsyncSocket(socket: socket, pool: pool)
+  defer { poolTask.cancel() }
   let drain = await bridge._startDraining(with: { data, peerAddress in
     try await asyncSocket.send(data, to: peerAddress)
   })
@@ -69,8 +77,6 @@ func udpEventLoop(address: sockaddr_storage, with bridge: OSCOCABridge) async th
   for try await pdu in asyncSocket.messages(maxMessageLength: MaxMessageSize) {
     try? await bridge._handle(message: Data(pdu.payload), from: pdu.peerAddress.makeStorage())
   }
-
-  poolTask.cancel()
 }
 
 #endif
