@@ -483,14 +483,16 @@ public actor OSCOCABridge {
     }
 
     // the peer is read and written back with nothing awaited between, as it may have been
-    // removed, or subscribed to more, while the emitters were retained
+    // removed, or subscribed to more, while the emitters were retained: another /subscribe
+    // from the same peer, run meanwhile, may have added a subscription this one also
+    // retained, whose extra retain is given back
     var peer = peers[destination] ?? Peer(host: host)
     peer.lastSeen = .now
     peer.isStatic = peer.isStatic || isStatic
-    var retainedTwice = [OcaONo]()
+    var alreadySubscribed = [OcaONo]()
     for subscription in retained {
       guard peer.subscriptions[subscription] == nil, let descriptor = resolved[subscription] else {
-        retainedTwice.append(subscription.oNo)
+        alreadySubscribed.append(subscription.oNo)
         continue
       }
       peer.subscriptions[subscription] = descriptor
@@ -504,7 +506,7 @@ public actor OSCOCABridge {
     }
     peers[destination] = peer
     peersByHost[host, default: []].insert(destination)
-    for oNo in retainedTwice {
+    for oNo in alreadySubscribed {
       await releaseEmitter(oNo)
     }
 
