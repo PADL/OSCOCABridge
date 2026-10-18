@@ -521,6 +521,49 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     await bridge.removeDestination(destination)
   }
 
+  func testQueuedValuesAreReplacedByNewerOnes() async throws {
+    // no socket yet: what is sent waits in the queue
+    let outbox = Outbox()
+    let bridge = OSCOCABridge(address: client)
+    await bridge.startOutbound()
+    let peer = try AnySocketAddress(
+      family: sa_family_t(AF_INET),
+      presentationAddress: "127.0.0.1:9500"
+    )
+    try await bridge._handle(
+      message: OSCMessage("/subscribe", values: ["/Block/Gain/gain", "/Block/Mute/state"])
+        .rawData(),
+      from: peer
+    )
+    // values no other test sets, as the device is shared and an unchanged value raises nothing
+    for value in stride(from: Float(-60), through: -50, by: 1) {
+      try await bridge._handle(
+        message: OSCMessage("/Block/Gain/gain", values: [value]).rawData(),
+        from: otherClient
+      )
+    }
+    try await bridge._handle(message: OSCMessage("/nothing/here").rawData(), from: peer)
+    try await bridge._handle(message: OSCMessage("/nothing/there").rawData(), from: peer)
+
+    await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
+    let messages = await outbox.messages(count: 4)
+    let late = await outbox.messages(count: 5, timeout: .milliseconds(200))
+    // the gain's values became one, which went out with the latest value; the two errors,
+    // queued after both initial values, were not merged
+    XCTAssertEqual(late.count, 4)
+    XCTAssertEqual(
+      Set(messages.prefix(2).map(\.message.addressPattern.stringValue)),
+      ["/Block/Gain/gain", "/Block/Mute/state"]
+    )
+    XCTAssertEqual(
+      messages.suffix(2).map(\.message.addressPattern.stringValue),
+      ["/error", "/error"]
+    )
+    let gain = messages.first { $0.message.addressPattern.stringValue == "/Block/Gain/gain" }
+    XCTAssertEqual(gain?.message.values as? [Float], [-50])
+    await bridge.stop()
+  }
+
   func testStaticDestination() async throws {
     let destination = try AnySocketAddress(
       family: sa_family_t(AF_INET),

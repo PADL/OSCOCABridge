@@ -56,7 +56,8 @@ public final class OSCOCABridge {
 
   /// The sender, where the drain reads it without the device's executor.
   private var senderSlot = OSCOCASenderSlot()
-  private var outbound: AsyncStream<(Data, AnySocketAddress)>.Continuation?
+  /// Messages waiting for the socket; nil while the bridge is stopped.
+  private var outbound: OSCOCAOutboundQueue?
   private var outboundTask: Task<(), Never>?
   /// Removes peers not heard from within `subscriptionLifetime`; none without one.
   private var leaseExpiryTask: Task<(), Never>?
@@ -178,7 +179,7 @@ public final class OSCOCABridge {
         removePeer(destination, on: host)
       }
     }
-    outbound?.finish()
+    outbound?.close()
     outbound = nil
     outboundTask?.cancel()
     outboundTask = nil
@@ -701,15 +702,15 @@ public final class OSCOCABridge {
   /// the socket is bound waits for it. A stopped bridge drains nothing, and sends nothing.
   func startOutbound() {
     guard outbound == nil else { return }
-    let (stream, continuation) = AsyncStream<(Data, AnySocketAddress)>
-      .makeStream(bufferingPolicy: .bufferingNewest(4096))
-    outbound = continuation
+    let outbound = OSCOCAOutboundQueue()
+    self.outbound = outbound
     // detached, so as not to drain on the device's executor and wait behind the work
     // that is raising what it drains
     let senderSlot = senderSlot
     outboundTask = Task.detached {
-      for await (data, destination) in stream {
-        // nil only when the bridge stops, which drops what is queued
+      // the socket first, so that what waits for it is merged in the queue meanwhile; and
+      // again after the message, as the socket may have changed while waiting for it
+      while await senderSlot.sender() != nil, let (data, destination) = await outbound.next() {
         guard let sender = await senderSlot.sender() else { break }
         try? await sender(data, destination)
       }
@@ -720,10 +721,17 @@ public final class OSCOCABridge {
     senderSlot.set(sender)
   }
 
-  /// Queues a message for a peer; the device never waits on the socket.
+  /// Queues a message for a peer; the device never waits on the socket. A value still
+  /// queued for the same address and peer is replaced, so that a peer that is not keeping
+  /// up is sent the latest value rather than every one; an `/error` is never replaced.
   private func send(_ message: OSCMessage, to destination: AnySocketAddress) {
     guard let outbound, let data = try? message.rawData() else { return }
-    outbound.yield((data, destination))
+    let address = message.addressPattern.stringValue
+    outbound.push(
+      data,
+      to: destination,
+      replacing: address == "/error" ? nil : address
+    )
   }
 
   /// Sends a property change to each peer subscribed to it. A vector property raises an
@@ -931,5 +939,102 @@ final class OSCOCASenderSlot: Sendable {
       }
       if let ready { continuation.resume(returning: ready) }
     }
+  }
+}
+
+/// Messages for peers, in the order they were queued, where a newer value for an address
+/// and peer replaces the one queued, keeping its place. Its size is bounded: past
+/// `capacity`, the oldest message is dropped.
+final class OSCOCAOutboundQueue: Sendable {
+  static let capacity = 4096
+
+  private struct Key: Hashable {
+    let destination: AnySocketAddress
+    /// The address a newer value replaces; nil, with `serial`, for one never replaced.
+    let address: String?
+    let serial: Int
+  }
+
+  private struct State {
+    var order = [Key]()
+    var head = 0
+    var messages = [Key: Data]()
+    var serial = 0
+    var waiter: CheckedContinuation<(Data, AnySocketAddress)?, Never>?
+    var isClosed = false
+
+    var count: Int { order.count - head }
+
+    mutating func popFirst() -> (Data, AnySocketAddress)? {
+      while head < order.count {
+        let key = order[head]
+        head += 1
+        // keep the array from growing without end as the head moves on
+        if head > 1024, head * 2 > order.count {
+          order.removeFirst(head)
+          head = 0
+        }
+        if let data = messages.removeValue(forKey: key) {
+          return (data, key.destination)
+        }
+      }
+      return nil
+    }
+  }
+
+  private let state = Mutex(State())
+
+  func push(_ data: Data, to destination: AnySocketAddress, replacing address: String?) {
+    let waiter: CheckedContinuation<(Data, AnySocketAddress)?, Never>? = state.withLock { state in
+      guard !state.isClosed else { return nil }
+      let key: Key
+      if let address {
+        key = Key(destination: destination, address: address, serial: 0)
+        if state.messages[key] != nil {
+          state.messages[key] = data
+          return nil
+        }
+      } else {
+        state.serial += 1
+        key = Key(destination: destination, address: nil, serial: state.serial)
+      }
+      if let waiter = state.waiter {
+        state.waiter = nil
+        return waiter
+      }
+      state.order.append(key)
+      state.messages[key] = data
+      if state.count > Self.capacity {
+        _ = state.popFirst()
+      }
+      return nil
+    }
+    waiter?.resume(returning: (data, destination))
+  }
+
+  /// The next message, once there is one; nil once the queue is closed.
+  func next() async -> (Data, AnySocketAddress)? {
+    await withCheckedContinuation { continuation in
+      let ready: (Data, AnySocketAddress)?? = state.withLock { state in
+        if let message = state.popFirst() { return .some(message) }
+        if state.isClosed { return .some(nil) }
+        state.waiter = continuation
+        return nil
+      }
+      if let ready { continuation.resume(returning: ready) }
+    }
+  }
+
+  /// Drops what is queued and ends waiting for good: the bridge has stopped.
+  func close() {
+    let waiter = state.withLock { state in
+      state.isClosed = true
+      state.order.removeAll()
+      state.head = 0
+      state.messages.removeAll()
+      defer { state.waiter = nil }
+      return state.waiter
+    }
+    waiter?.resume(returning: nil)
   }
 }
