@@ -344,6 +344,28 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     )
   }
 
+  func testManagersAreAddressedByRole() async throws {
+    try await send(OSCMessage("/DeviceManager/deviceName", values: ["OSC Test"]))
+    try await send(OSCMessage("/DeviceManager/deviceName"))
+    var messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map { $0.message.values as? [String] }, [["OSC Test"]])
+    await outbox.removeAll()
+
+    // as are the properties a pattern matches
+    try await send(OSCMessage("/subscribe", values: ["/Device*/device[N]ame", Int32(9001)]))
+    messages = await outbox.messages(count: 1)
+    XCTAssertEqual(
+      messages.map(\.message.addressPattern.stringValue),
+      ["/DeviceManager/deviceName"]
+    )
+    await outbox.removeAll()
+
+    try await send(OSCMessage("/DeviceManager/deviceName", values: ["Renamed"]), from: otherClient)
+    messages = await outbox.messages(count: 1)
+    XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9001"])
+    XCTAssertEqual(messages.map { $0.message.values as? [String] }, [["Renamed"]])
+  }
+
   func testSubscribeToEverything() async throws {
     let expected: Set = ["/Block/Gain/gain", "/Block/Mute/state"]
     try await send(OSCMessage("/subscribe"))

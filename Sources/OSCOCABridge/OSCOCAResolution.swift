@@ -111,6 +111,16 @@ func oscObjects(
   return objects
 }
 
+/// The device's managers, which are outside the root block, each with its role as its role
+/// path: `/DeviceManager/deviceName`.
+@OcaDevice
+func oscManagers(of device: OcaDevice) async -> [(
+  rolePath: OcaNamePath,
+  object: SwiftOCADevice.OcaRoot
+)] {
+  await device.managers.map { (rolePath: [$0.role], object: $0) }
+}
+
 /// The address of a role path and leaf: `/Block/Gain/gain`.
 func oscAddress(rolePath: OcaNamePath, leaf: String) -> String {
   "/" + (rolePath + [leaf]).joined(separator: "/")

@@ -4,7 +4,7 @@ OSCOCABridge allows OCA devices implemented with [SwiftOCA](https://github.com/P
 
 ## Addresses
 
-The OSC address space is the device's object tree. An object is addressed by its role path, and the last component of the address names one of its members:
+The OSC address space is the device's object tree, and its managers, which are outside the tree, addressed by their roles alone (`/DeviceManager/deviceName`). An object is addressed by its role path, and the last component of the address names one of its members:
 
 | Last component | Example | Meaning |
 |---|---|---|

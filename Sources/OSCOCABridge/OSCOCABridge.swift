@@ -280,12 +280,15 @@ public actor OSCOCABridge {
     guard let rootBlock = await device.rootBlock else {
       throw Ocp1Error.status(.deviceError)
     }
-    guard let oNo = try await rootBlock.findActionObjectsByRolePath(
+    var oNo = try await rootBlock.findActionObjectsByRolePath(
       searchPath: rolePath,
       resultFlags: .oNo,
       from: self
-    ).first?.oNo,
-      let object = await device.resolve(objectNumber: oNo)
+    ).first?.oNo
+    if oNo == nil, rolePath.count == 1 {
+      oNo = await oscManagers(of: device).first { $0.rolePath == rolePath }?.object.objectNumber
+    }
+    guard let oNo, let object = await device.resolve(objectNumber: oNo)
     else {
       throw Ocp1Error.status(.badONo)
     }
@@ -476,7 +479,8 @@ public actor OSCOCABridge {
       guard let rootBlock = await device.rootBlock else {
         throw Ocp1Error.status(.deviceError)
       }
-      for (rolePath, object) in await oscObjects(in: rootBlock) {
+      let objects = await oscObjects(in: rootBlock) + oscManagers(of: device)
+      for (rolePath, object) in objects {
         for descriptor in await object.oscVisibleProperties where descriptor.getMethodID != nil {
           let byName = oscAddress(rolePath: rolePath, leaf: descriptor.name)
           let byID = oscAddress(rolePath: rolePath, leaf: descriptor.propertyID.oscLeaf)
