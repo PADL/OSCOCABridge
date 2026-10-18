@@ -144,16 +144,17 @@ public final class OSCOCABridge {
 
   public func run() {
     task?.cancel()
-    startOutbound()
     startExpiringLeases()
     let address = address
     task = Task {
+      await startOutbound()
       try? await udpEventLoop(address: address, with: self)
     }
   }
 
   /// Stops the bridge. Its peers' subscriptions are removed; destinations added with
-  /// `addDestination(_:patterns:)` are kept, and are sent changes again once it runs.
+  /// `addDestination(_:patterns:)` are kept, and are sent their current values and then
+  /// changes again once it runs.
   public func stop() {
     task?.cancel()
     task = nil
@@ -176,7 +177,6 @@ public final class OSCOCABridge {
     _ destination: any SocketAddress,
     patterns: [String] = []
   ) async throws {
-    startOutbound()
     try await subscribe(AnySocketAddress(destination), to: patterns, isStatic: true)
   }
 
@@ -682,11 +682,23 @@ public final class OSCOCABridge {
 
   // MARK: - outbound
 
-  /// Starts queueing outbound messages, if that is not under way. A message queued before
-  /// the socket is bound waits for it. A stopped bridge queues nothing, and sends nothing.
-  func startOutbound() {
+  /// Starts queueing outbound messages, as the bridge runs, if that is not under way. A
+  /// message queued before the socket is bound waits for it. A stopped bridge queues
+  /// nothing, so the destinations, which it kept, are first queued their current values.
+  func startOutbound() async {
     guard outbound == nil else { return }
     outbound = OSCOCAOutboundQueue()
+    for destinations in peers.values {
+      for (destination, peer) in destinations where peer.isStatic {
+        for (subscription, descriptor) in peer.subscriptions {
+          if let object = object(subscription.oNo),
+             let values = try? await get(descriptor, of: object)
+          {
+            send(OSCMessage(subscription.address, values: values), to: destination)
+          }
+        }
+      }
+    }
   }
 
   /// Sends the queued messages with `sender`, until the task is cancelled or the bridge
@@ -694,8 +706,8 @@ public final class OSCOCABridge {
   /// socket goes; a newer drain takes over from an older one.
   @discardableResult
   func _startDraining(with sender: @escaping Sender) -> Task<(), Never> {
-    startOutbound()
-    let outbound = outbound!
+    // the bridge has stopped since the event loop started
+    guard let outbound else { return Task {} }
     // detached, so as not to drain on the device's executor and wait behind the work
     // that is raising what it drains
     return Task.detached {

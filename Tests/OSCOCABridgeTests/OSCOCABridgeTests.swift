@@ -218,6 +218,7 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     let outbox = Outbox()
     self.outbox = outbox
     bridge = OSCOCABridge(address: client)
+    await bridge.startOutbound()
     await bridge._startDraining(with: { data, destination in
       await outbox.append(data, to: destination)
     })
@@ -424,7 +425,8 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
     var messages = await outbox.messages(count: 1, timeout: .milliseconds(200))
     XCTAssertTrue(messages.isEmpty)
 
-    // the socket arrives, as it does when the bridge runs; the initial value was waiting
+    // the bridge runs and its socket arrives
+    await bridge.startOutbound()
     await bridge._startDraining(with: { data, destination in
       await outbox.append(data, to: destination)
     })
@@ -510,17 +512,21 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
 
     await bridge.stop()
     await outbox.removeAll()
-    // as run() would: drain again, with a new socket
+    // a change while stopped is sent to no one
+    try await send(OSCMessage("/Block/Mute/state", values: [true]))
+    // as run() would: queue again, and drain with a new socket
     let outbox = outbox!
+    await bridge.startOutbound()
     await bridge._startDraining(with: { data, destination in
       await outbox.append(data, to: destination)
     })
 
-    try await send(OSCMessage("/Block/Mute/state", values: [true]))
+    // the destination was kept, and is sent the value it missed; the peer's subscription
+    // went with the stop
     let messages = await outbox.messages(count: 1)
-    // the destination was kept; the peer's subscription went with the stop
     let late = await outbox.messages(count: 2, timeout: .milliseconds(200))
     XCTAssertEqual(messages.map(\.destination), ["127.0.0.1:9400"])
+    XCTAssertEqual(messages.map { $0.message.values as? [Bool] }, [[true]])
     XCTAssertEqual(late.count, 1)
     await bridge.removeDestination(destination)
   }
