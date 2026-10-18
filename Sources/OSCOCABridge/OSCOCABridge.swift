@@ -30,6 +30,7 @@ import Darwin
 import Glibc
 #endif
 import SocketAddress
+import Synchronization
 
 let MaxMessageSize = 1500
 
@@ -53,9 +54,8 @@ public final class OSCOCABridge {
   /// Sends a datagram from the bridge's socket, once the event loop has bound it.
   typealias Sender = @Sendable (Data, AnySocketAddress) async throws -> ()
 
-  private var sender: Sender?
-  /// Outbound messages wait for the socket; see `awaitSender`.
-  private var senderWaiters = [CheckedContinuation<Sender?, Never>]()
+  /// The sender, where the drain reads it without the device's executor.
+  private var senderSlot = OSCOCASenderSlot()
   private var outbound: AsyncStream<(Data, AnySocketAddress)>.Continuation?
   private var outboundTask: Task<(), Never>?
   /// Removes peers not heard from within `subscriptionLifetime`; none without one.
@@ -148,7 +148,7 @@ public final class OSCOCABridge {
 
   public func run() {
     task?.cancel()
-    sender = nil
+    senderSlot.set(nil)
     eventLoopGeneration += 1
     let generation = eventLoopGeneration
     startOutbound()
@@ -163,7 +163,7 @@ public final class OSCOCABridge {
   /// The socket an event loop sent from has gone with it.
   private func eventLoopEnded(_ generation: Int) {
     guard generation == eventLoopGeneration else { return }
-    sender = nil
+    senderSlot.set(nil)
   }
 
   /// Stops the bridge. Its peers' subscriptions are removed; destinations added with
@@ -182,12 +182,9 @@ public final class OSCOCABridge {
     outbound = nil
     outboundTask?.cancel()
     outboundTask = nil
-    sender = nil
     // an outbound message waiting for the socket is dropped with it
-    for waiter in senderWaiters {
-      waiter.resume(returning: nil)
-    }
-    senderWaiters.removeAll()
+    senderSlot.close()
+    senderSlot = OSCOCASenderSlot()
   }
 
   /// Sends the changes of every property matching `patterns`, or of every property if there
@@ -707,27 +704,20 @@ public final class OSCOCABridge {
     let (stream, continuation) = AsyncStream<(Data, AnySocketAddress)>
       .makeStream(bufferingPolicy: .bufferingNewest(4096))
     outbound = continuation
-    outboundTask = Task { [weak self] in
+    // detached, so as not to drain on the device's executor and wait behind the work
+    // that is raising what it drains
+    let senderSlot = senderSlot
+    outboundTask = Task.detached {
       for await (data, destination) in stream {
         // nil only when the bridge stops, which drops what is queued
-        guard let sender = await self?.awaitSender() else { break }
+        guard let sender = await senderSlot.sender() else { break }
         try? await sender(data, destination)
       }
     }
   }
 
   func _set(sender: @escaping Sender) {
-    self.sender = sender
-    for waiter in senderWaiters {
-      waiter.resume(returning: sender)
-    }
-    senderWaiters.removeAll()
-  }
-
-  /// The sender, once the event loop has set one; nil if the bridge stops first.
-  private func awaitSender() async -> Sender? {
-    if let sender { return sender }
-    return await withCheckedContinuation { senderWaiters.append($0) }
+    senderSlot.set(sender)
   }
 
   /// Queues a message for a peer; the device never waits on the socket.
@@ -888,6 +878,58 @@ extension OSCOCABridge: OcaController {
   ) async throws {
     for case let notification as Ocp1Notification2 in messages {
       await handle(notification)
+    }
+  }
+}
+
+/// The socket's sender, which the outbound drain waits for and reads without being on the
+/// device's executor.
+final class OSCOCASenderSlot: Sendable {
+  private struct State {
+    var sender: OSCOCABridge.Sender?
+    var waiters = [CheckedContinuation<OSCOCABridge.Sender?, Never>]()
+    var isClosed = false
+  }
+
+  private let state = Mutex(State())
+
+  /// Sets the sender, or clears it while the socket is gone; a waiter is given a new one.
+  func set(_ sender: OSCOCABridge.Sender?) {
+    let waiters = state.withLock { state in
+      state.sender = sender
+      guard sender != nil else { return [CheckedContinuation<OSCOCABridge.Sender?, Never>]() }
+      defer { state.waiters.removeAll() }
+      return state.waiters
+    }
+    for waiter in waiters {
+      waiter.resume(returning: sender)
+    }
+  }
+
+  /// Ends waiting for good: the bridge has stopped.
+  func close() {
+    let waiters = state.withLock { state in
+      state.isClosed = true
+      state.sender = nil
+      defer { state.waiters.removeAll() }
+      return state.waiters
+    }
+    for waiter in waiters {
+      waiter.resume(returning: nil)
+    }
+  }
+
+  /// The sender, once there is one; nil once the slot is closed.
+  func sender() async -> OSCOCABridge.Sender? {
+    if let sender = state.withLock({ $0.sender }) { return sender }
+    return await withCheckedContinuation { continuation in
+      let ready: OSCOCABridge.Sender?? = state.withLock { state in
+        if let sender = state.sender { return .some(sender) }
+        if state.isClosed { return .some(nil) }
+        state.waiters.append(continuation)
+        return nil
+      }
+      if let ready { continuation.resume(returning: ready) }
     }
   }
 }
