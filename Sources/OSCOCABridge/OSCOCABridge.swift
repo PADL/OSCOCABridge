@@ -352,7 +352,7 @@ public final class OSCOCABridge {
 
     if let object = object as? OSCOCACustomBridgeable {
       do {
-        let values = try await object.ocaParameters(for: methodID, from: message)
+        let values = try object.ocaParameters(for: methodID, from: message)
         parameters = try (values.count, values.map { $0 as any Encodable }._ocp1Encoded)
       } catch OSCOCACustomBridgeableError.methodNotBridged {}
     }
@@ -400,7 +400,7 @@ public final class OSCOCABridge {
     var value: (any Encodable & Sendable)?
     if let object = object as? OSCOCACustomBridgeable {
       do {
-        value = try await object.ocaValue(for: descriptor.propertyID, from: message)
+        value = try object.ocaValue(for: descriptor.propertyID, from: message)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
     }
     let encoded: Data
@@ -433,7 +433,7 @@ public final class OSCOCABridge {
   ) async throws -> OSCValues {
     if let object = object as? OSCOCACustomBridgeable {
       do {
-        return try await object.oscValues(for: descriptor.propertyID, from: value)
+        return try object.oscValues(for: descriptor.propertyID, from: value)
       } catch OSCOCACustomBridgeableError.propertyNotBridged {}
     }
     return try OSCValueBridge.oscValues(from: value)
@@ -510,7 +510,7 @@ public final class OSCOCABridge {
       }
       let objects = await oscObjects(in: rootBlock) + managers
       for (rolePath, object) in objects {
-        for descriptor in await object.oscVisibleProperties where descriptor.getMethodID != nil {
+        for descriptor in object.oscVisibleProperties where descriptor.getMethodID != nil {
           let byName = oscAddress(rolePath: rolePath, leaf: descriptor.name)
           let byID = oscAddress(rolePath: rolePath, leaf: descriptor.propertyID.oscLeaf)
           let address: String? = if patterns.isEmpty {
@@ -679,7 +679,7 @@ public final class OSCOCABridge {
     leaseExpiryTask = Task { [weak self] in
       while !Task.isCancelled {
         try? await Task.sleep(for: subscriptionLifetime / 2)
-        await self?.expireLeases(olderThan: subscriptionLifetime)
+        self?.expireLeases(olderThan: subscriptionLifetime)
       }
     }
   }
