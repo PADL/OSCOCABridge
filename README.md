@@ -28,9 +28,9 @@ Errors are reported to the sender as `/error ,ss <address> <reason>`.
 
 `/subscribe` sends the sender the current value of each property named, then every change to it, on the address as it was subscribed with. Addresses may use OSC wildcards (`/Block/*/gain`); with none, every property is subscribed to. Changes are sent to the sender's address, or to the given port on its host, for a client such as TouchOSC that receives on a port of its own. `/unsubscribe` with no addresses removes all of the sender's subscriptions.
 
-`OSCOCABridge(address:device:subscriptionLifetime:)` can expire a client's subscriptions once nothing has been heard from its host for that long. `addDestination(_:patterns:)` sends changes to a fixed address without the client subscribing. Such a destination lasts until `removeDestination(_:)`, across `stop()` and `run()`; `stop()` removes clients' subscriptions.
+`OSCOCABridge(address:subscriptionLifetime:)` can expire a client's subscriptions once nothing has been heard from its host for that long. `addDestination(_:patterns:)` sends changes to a fixed address without the client subscribing. Such a destination lasts until `removeDestination(_:)`, across `stop()` and `run()`; `stop()` removes clients' subscriptions.
 
-The bridge runs on the device's executor, so it must be given `OcaDevice.shared`.
+The bridge is isolated to the device's global actor, `@OcaDevice`, and bridges `OcaDevice.shared`.
 
 ## Examples
 

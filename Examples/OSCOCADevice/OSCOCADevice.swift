@@ -66,7 +66,7 @@ public enum OSCOCADevice {
     #if canImport(Darwin)
     listenAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     #endif
-    let bridge = OSCOCABridge(address: listenAddress, device: device)
+    let bridge = OSCOCABridge(address: listenAddress)
     await bridge.run()
 
     class MyBooleanActuator: SwiftOCADevice.OcaBooleanActuator {

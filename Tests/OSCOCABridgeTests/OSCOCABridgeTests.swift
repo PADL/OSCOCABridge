@@ -217,7 +217,7 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
 
     let outbox = Outbox()
     self.outbox = outbox
-    bridge = OSCOCABridge(address: client, device: device)
+    bridge = OSCOCABridge(address: client)
     await bridge._set(sender: { data, destination in await outbox.append(data, to: destination) })
     await bridge.startOutbound()
   }
@@ -414,7 +414,7 @@ final class OSCOCABridgeDeviceTests: XCTestCase {
 
   func testDestinationAddedBeforeRunningIsSentOnceRunning() async throws {
     let outbox = Outbox()
-    let bridge = OSCOCABridge(address: client, device: device)
+    let bridge = OSCOCABridge(address: client)
     let destination = try AnySocketAddress(
       family: sa_family_t(AF_INET),
       presentationAddress: "127.0.0.1:9300"
